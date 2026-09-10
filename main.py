@@ -6,14 +6,17 @@ import google.generativeai as genai
 
 app = FastAPI()
 
-# --- CONFIGURATION ---
+# --- KONFIGURASI ENV ---
 VERIFY_TOKEN = os.getenv("WA_VERIFY_TOKEN", "robomantap_secret_token")
 WHATSAPP_TOKEN = os.getenv("WA_ACCESS_TOKEN")
 PHONE_NUMBER_ID = os.getenv("WA_PHONE_NUMBER_ID")
 
-# Rotasi API Key Gratis Gemini (Dipisahkan koma di Render)
+# Rotasi API Key Gemini (Pisahkan koma di Render)
 GEMINI_KEYS_RAW = os.getenv("GEMINI_KEYS", "")
 GEMINI_KEYS = [k.strip() for k in GEMINI_KEYS_RAW.split(",") if k.strip()]
+
+# Tuple Model Pilihan
+MODELS = ("gemini-3.5-flash-lite", "gemini-3.1-flash-lite")
 
 def get_random_gemini_key():
     """Mengambil salah satu API key gratis secara acak"""
@@ -22,15 +25,18 @@ def get_random_gemini_key():
     return os.getenv("GEMINI_API_KEY", "")
 
 def generate_ai_response(prompt_text):
-    """Panggil Gemini Flash-Lite dengan Rotasi Key"""
+    """Panggil Gemini AI menggunakan rotasi Key & Model"""
     selected_key = get_random_gemini_key()
     if not selected_key:
+        print("LOG ERROR: Variabel GEMINI_KEYS kosong atau tidak terdeteksi.")
         return "Sistem AI belum mengonfigurasi API Key."
+        
+    # Memilih model secara acak dari tuple MODELS
+    selected_model = random.choice(MODELS)
         
     try:
         genai.configure(api_key=selected_key)
-        # Menggunakan model Flash-Lite gratis
-        model = genai.GenerativeModel("gemini-3.5-flash-lite")
+        model = genai.GenerativeModel(selected_model)
         
         system_instruction = (
             "Anda adalah Asisten AI U.Project Nexus (RoboMANTAP) untuk Madrasah Al-Irsyad Al-Islamiyah Putri Bondowoso. "
@@ -38,9 +44,10 @@ def generate_ai_response(prompt_text):
         )
         
         response = model.generate_content(f"{system_instruction}\n\nPertanyaan: {prompt_text}")
+        print(f"LOG Sukses AI -> Model: {selected_model} | Key: {selected_key[:6]}...")
         return response.text
     except Exception as e:
-        print(f"Error Gemini API ({selected_key[:6]}...): {e}")
+        print(f"LOG ERROR Gemini API ({selected_model} | Key: {selected_key[:6]}...): {e}")
         return "Mohon maaf, sistem AI sedang padat. Silakan kirim ulang pesan Anda beberapa saat lagi."
 
 def send_whatsapp_message(to_phone, message_text):
@@ -57,11 +64,14 @@ def send_whatsapp_message(to_phone, message_text):
         "text": {"body": message_text}
     }
     try:
-        requests.post(url, json=payload, headers=headers)
+        res = requests.post(url, json=payload, headers=headers)
+        print(f"LOG Send WA Status Code: {res.status_code}")
+        if res.status_code != 200:
+            print(f"LOG Meta API Error Response: {res.text}")
     except Exception as e:
-        print(f"Error sending WA message: {e}")
+        print(f"LOG ERROR Sending WA Message: {e}")
 
-# --- WEBHOOK ENDPOINTS ---
+# --- ENDPOINT WEBHOOK ---
 @app.get("/")
 async def root():
     return {"message": "U.Project Nexus WhatsApp Webhook Running!"}
@@ -82,21 +92,27 @@ async def verify_webhook(request: Request):
 async def receive_whatsapp(request: Request):
     """Menerima Pesan Masuk dari WhatsApp"""
     data = await request.json()
+    print(f"LOG Incoming Webhook Payload: {data}")
     try:
-        entry = data["entry"][0]["changes"][0]["value"]
-        if "messages" in entry:
-            message = entry["messages"][0]
+        entry = data.get("entry", [])[0]
+        changes = entry.get("changes", [])[0]
+        value = changes.get("value", {})
+        
+        if "messages" in value:
+            message = value["messages"][0]
             from_number = message["from"]
             
             if message.get("type") == "text":
                 user_text = message["text"]["body"]
+                print(f"LOG Pesan Masuk ({from_number}): {user_text}")
                 
-                # Proses dengan Gemini AI
+                # Olah dengan Gemini AI
                 ai_reply = generate_ai_response(user_text)
+                print(f"LOG Balasan AI Terbentuk: {ai_reply[:50]}...")
                 
-                # Kirim balasan ke WA
+                # Kirim ke WhatsApp
                 send_whatsapp_message(from_number, ai_reply)
     except Exception as e:
-        print(f"Error processing payload: {e}")
+        print(f"LOG ERROR Processing Webhook Payload: {e}")
         
     return {"status": "success"}
