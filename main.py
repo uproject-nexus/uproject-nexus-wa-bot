@@ -9,25 +9,30 @@ from google.genai import types
 from docx import Document
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+from docx.oxml import parse_xml
+from docx.oxml.ns import nsdecls
+from reportlab.lib import colors
+from reportlab.lib.units import cm
+from reportlab.lib.pagesizes import A4
+from datetime import datetime, timedelta
+from docx.shared import Pt, RGBColor, Inches
+from docx.enum.table import WD_ALIGN_VERTICAL
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY, TA_LEFT
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-
-
 
 # ============================================================
 # APP
 # ============================================================
-
 app = FastAPI(
     title="RoboMANTAP WhatsApp AI",
     description="WhatsApp AI Assistant for RoboMANTAP",
     version="1.3.0"
 )
 
-
 # ============================================================
 # ENVIRONMENT CONFIGURATION
 # ============================================================
-
 VERIFY_TOKEN = os.getenv(
     "WA_VERIFY_TOKEN",
     "robomantap_secret_token"
@@ -36,11 +41,9 @@ VERIFY_TOKEN = os.getenv(
 WHATSAPP_TOKEN = os.getenv("WA_ACCESS_TOKEN")
 PHONE_NUMBER_ID = os.getenv("WA_PHONE_NUMBER_ID")
 
-
 # ============================================================
 # GEMINI API KEY ROTATION
 # ============================================================
-
 GEMINI_KEYS_RAW = os.getenv("GEMINI_KEYS", "")
 
 GEMINI_KEYS = [
@@ -50,7 +53,6 @@ GEMINI_KEYS = [
 ]
 
 FALLBACK_GEMINI_KEY = os.getenv("GEMINI_API_KEY", "")
-
 
 # ============================================================
 # MODEL ROTATION
@@ -725,66 +727,220 @@ async def receive_whatsapp(request: Request, background_tasks: BackgroundTasks):
 # ============================================================
 # DOCUMENT GENERATOR HELPER (WORD & PDF)
 # ============================================================
-def create_word_docx(text_content: str) -> bytes:
-    """Mengubah teks jawaban AI menjadi file Word (.docx) dalam memori."""
-    doc = Document()
-    doc.add_heading("RoboMANTAP - Dokumen Ajar", level=1)
-    
-    lines = text_content.split("\n")
-    for line in lines:
-        line_str = line.strip()
-        if not line_str:
+# ============================================================
+# HELPER PARSER RUNS UNTUK WORD
+# ============================================================
+def _add_formatted_runs_word(paragraph, text: str):
+    """Memecah teks *bold* dan _italic_ menjadi runs yang rapi di python-docx."""
+    tokens = re.split(r'(\*[^*]+\*|_[^_]+_)', text)
+    for token in tokens:
+        if not token:
             continue
-        if line_str.startswith("*") and line_str.endswith("*"):
-            doc.add_heading(line_str.replace("*", ""), level=2)
-        elif line_str.startswith("• "):
-            doc.add_paragraph(line_str.replace("• ", ""), style="List Bullet")
+        if token.startswith('*') and token.endswith('*'):
+            run = paragraph.add_run(token[1:-1])
+            run.bold = True
+        elif token.startswith('_') and token.endswith('_'):
+            run = paragraph.add_run(token[1:-1])
+            run.italic = True
         else:
-            doc.add_paragraph(line_str.replace("*", ""))
+            paragraph.add_run(token)
 
-    target_stream = io.BytesIO()
-    doc.save(target_stream)
-    return target_stream.getvalue()
+# ============================================================
+# WORD DOCUMENT GENERATOR (.DOCX)
+# ============================================================
+def create_word_docx(text_content: str) -> bytes:
+    """Mengubah teks jawaban AI menjadi file Word (.docx) dengan layout profesional."""
+    doc = Document()
 
+    # Set Ukuran Kertas & Marjin A4 (2 cm sekeliling)
+    for section in doc.sections:
+        section.page_width = Cm(21.0)
+        section.page_height = Cm(29.7)
+        section.top_margin = Cm(2.0)
+        section.bottom_margin = Cm(2.0)
+        section.left_margin = Cm(2.0)
+        section.right_margin = Cm(2.0)
 
-def create_pdf_doc(text_content: str) -> bytes:
-    """Mengubah teks jawaban AI menjadi file PDF dalam memori."""
-    target_stream = io.BytesIO()
-    doc = SimpleDocTemplate(target_stream, pagesize=letter)
-    styles = getSampleStyleSheet()
+    # Header / Judul Dokumen
+    p_title = doc.add_paragraph()
+    p_title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    p_title.paragraph_format.space_after = Pt(12)
+    p_title.paragraph_format.space_before = Pt(0)
     
-    story = []
-    title_style = styles["Heading1"]
-    body_style = ParagraphStyle(
-        'PDFBody',
-        parent=styles['Normal'],
-        fontSize=10,
-        leading=14,
-        spaceAfter=6
-    )
-
-    story.append(Paragraph("<b>RoboMANTAP - Dokumen Ajar</b>", title_style))
-    story.append(Spacer(1, 12))
+    r_title = p_title.add_run("RoboMANTAP — Dokumen")
+    r_title.font.name = 'Calibri'
+    r_title.font.size = Pt(14)
+    r_title.font.bold = True
+    r_title.font.color.rgb = RGBColor(0x1A, 0x36, 0x5D)  # Navy Blue
 
     lines = text_content.split("\n")
     for line in lines:
         clean_line = line.strip()
         if not clean_line:
             continue
-        # Konversi format bold WhatsApp ke HTML tag untuk PDF
-        clean_line = re.sub(r"\*([^*]+)\*", r"<b>\1</b>", clean_line)
-        clean_line = re.sub(r"_([^_]+)_", r"<i>\1</i>", clean_line)
-        
-        story.append(Paragraph(clean_line, body_style))
 
-    doc.build(story)
+        # Filter basa-basi AI
+        if any(clean_line.startswith(prefix) for prefix in [
+            "Baik Ustadzah", "Mohon maaf", "Namun, Ustadzah", "Berikut adalah", 
+            "Semoga draf", "Jika ada tambahan", "Saya telah menyusunkan",
+            "Semangat belajar", "Tentu, yuk", "Assalamu’alaikum"
+        ]):
+            continue
+
+        # Clean LaTeX Sisa
+        clean_line = clean_line.replace(r"\circ", "°").replace(r"\cdot", "·").replace("\\", "")
+        clean_line = re.sub(r"\\frac\{([^}]+)\}\{([^}]+)\}", r"\1/\2", clean_line)
+
+        # Cek jika Sub-Judul / Header Soal
+        if clean_line.startswith("#") or (clean_line.startswith("*") and clean_line.endswith("*") and len(clean_line) < 80):
+            heading_text = clean_line.strip("#* ").strip()
+            p_head = doc.add_paragraph()
+            p_head.alignment = WD_ALIGN_PARAGRAPH.LEFT
+            p_head.paragraph_format.space_before = Pt(10)
+            p_head.paragraph_format.space_after = Pt(4)
+            
+            r_head = p_head.add_run(heading_text)
+            r_head.font.name = 'Calibri'
+            r_head.font.bold = True
+            r_head.font.size = Pt(11)
+            r_head.font.color.rgb = RGBColor(0x1A, 0x36, 0x5D)
+
+        # Cek Poin / Bullet
+        elif clean_line.startswith("• ") or clean_line.startswith("- "):
+            bullet_text = clean_line[2:].strip()
+            p_bullet = doc.add_paragraph(style='List Bullet')
+            p_bullet.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+            p_bullet.paragraph_format.space_after = Pt(3)
+            p_bullet.paragraph_format.line_spacing = 1.15
+            _add_formatted_runs_word(p_bullet, bullet_text)
+
+        # Paragraf Biasa (Rata Kanan-Kiri / Justify)
+        else:
+            p_body = doc.add_paragraph()
+            p_body.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+            p_body.paragraph_format.space_after = Pt(6)
+            p_body.paragraph_format.line_spacing = 1.15
+            _add_formatted_runs_word(p_body, clean_line)
+
+    target_stream = io.BytesIO()
+    doc.save(target_stream)
     return target_stream.getvalue()
 
 
 # ============================================================
-# UPLOAD MEDIA & SEND DOCUMENT TO WHATSAPP API
+# PDF DOCUMENT GENERATOR (.PDF)
 # ============================================================
 
+def create_pdf_doc(text_content: str) -> bytes:
+    """Mengubah teks jawaban AI menjadi file PDF rapi dengan tata letak presisi."""
+    target_stream = io.BytesIO()
+    doc = SimpleDocTemplate(
+        target_stream,
+        pagesize=A4,
+        rightMargin=2*cm,
+        leftMargin=2*cm,
+        topMargin=2*cm,
+        bottomMargin=2*cm
+    )
+    styles = getSampleStyleSheet()
+
+    # Style Judul Dokumen
+    title_style = ParagraphStyle(
+        'PDFTitle',
+        parent=styles['Heading1'],
+        fontName='Helvetica-Bold',
+        fontSize=14,
+        leading=18,
+        alignment=TA_CENTER,
+        textColor=colors.HexColor('#1A365D'),
+        spaceAfter=12
+    )
+
+    # Style Sub-Judul / Header
+    heading_style = ParagraphStyle(
+        'PDFHeading',
+        parent=styles['Heading2'],
+        fontName='Helvetica-Bold',
+        fontSize=11,
+        leading=15,
+        alignment=TA_LEFT,
+        textColor=colors.HexColor('#1A365D'),
+        spaceBefore=10,
+        spaceAfter=4
+    )
+
+    # Style Paragraf Utama (Justify)
+    body_style = ParagraphStyle(
+        'PDFBody',
+        parent=styles['Normal'],
+        fontName='Helvetica',
+        fontSize=10,
+        leading=14,
+        alignment=TA_JUSTIFY,
+        spaceAfter=6,
+        textColor=colors.HexColor('#222222')
+    )
+
+    # Style Poin / Bullet
+    bullet_style = ParagraphStyle(
+        'PDFBullet',
+        parent=styles['Normal'],
+        fontName='Helvetica',
+        fontSize=10,
+        leading=14,
+        alignment=TA_JUSTIFY,
+        leftIndent=15,
+        spaceAfter=3,
+        textColor=colors.HexColor('#222222')
+    )
+
+    story = [
+        Paragraph("RoboMANTAP — Dokumen", title_style),
+        Spacer(1, 6)
+    ]
+
+    lines = text_content.split("\n")
+    for line in lines:
+        clean_line = line.strip()
+        if not clean_line:
+            continue
+
+        # Filter basa-basi obrolan AI
+        if any(clean_line.startswith(prefix) for prefix in [
+            "Baik Ustadzah", "Mohon maaf", "Namun, Ustadzah", "Berikut adalah", 
+            "Semoga draf", "Jika ada tambahan", "Saya telah menyusunkan",
+            "Semangat belajar", "Tentu, yuk", "Assalamu’alaikum"
+        ]):
+            continue
+
+        # Clean LaTeX Sisa
+        clean_line = clean_line.replace(r"\circ", "°").replace(r"\cdot", "·").replace("\\", "")
+        clean_line = re.sub(r"\\frac\{([^}]+)\}\{([^}]+)\}", r"\1/\2", clean_line)
+
+        # Format Bold & Italic WA ke Tag HTML ReportLab
+        formatted_text = re.sub(r"\*([^*]+)\*", r"<b>\1</b>", clean_line)
+        formatted_text = re.sub(r"_([^_]+)_", r"<i>\1</i>", formatted_text)
+
+        # Header / Sub-Judul
+        if clean_line.startswith("#") or (clean_line.startswith("*") and clean_line.endswith("*") and len(clean_line) < 80):
+            clean_heading = clean_line.strip("#* ").strip()
+            story.append(Paragraph(f"<b>{clean_heading}</b>", heading_style))
+        
+        # Bullet
+        elif clean_line.startswith("• ") or clean_line.startswith("- "):
+            bullet_text = formatted_text[2:].strip()
+            story.append(Paragraph(f"• {bullet_text}", bullet_style))
+            
+        # Paragraf Biasa
+        else:
+            story.append(Paragraph(formatted_text, body_style))
+
+    doc.build(story)
+    return target_stream.getvalue()
+
+# ============================================================
+# UPLOAD MEDIA & SEND DOCUMENT TO WHATSAPP API
+# ============================================================
 def upload_media_to_whatsapp(file_bytes: bytes, mime_type: str, filename: str) -> str:
     """Mengunggah file ke Meta WhatsApp Media API untuk mendapatkan media_id."""
     if not WHATSAPP_TOKEN or not PHONE_NUMBER_ID:
@@ -807,7 +963,6 @@ def upload_media_to_whatsapp(file_bytes: bytes, mime_type: str, filename: str) -
     except Exception as e:
         print(f"LOG ERROR upload_media_to_whatsapp: {e}")
         return None
-
 
 def send_whatsapp_document(to_phone: str, media_id: str, filename: str, caption: str = ""):
     """Mengirimkan file dokumen (Word/PDF) ke pengguna WhatsApp."""
