@@ -2,7 +2,7 @@ import os
 import re
 import random
 import requests
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, Request, Response, BackgroundTasks
 from google import genai
 from google.genai import types
 
@@ -14,7 +14,7 @@ from google.genai import types
 app = FastAPI(
     title="RoboMANTAP WhatsApp AI",
     description="WhatsApp AI Assistant for RoboMANTAP",
-    version="1.2.0"
+    version="1.3.0"
 )
 
 
@@ -57,11 +57,15 @@ MODELS = (
 
 
 # ============================================================
-# IN-MEMORY CHAT HISTORY (MEMORY PER USER)
+# IN-MEMORY CHAT HISTORY & MESSAGE DEDUPLICATION
 # ============================================================
 
 CHAT_HISTORIES = {}
 MAX_HISTORY_LENGTH = 12
+
+# Mencegah eksekusi ganda jika Meta melakukan retry
+PROCESSED_MESSAGE_IDS = set()
+MAX_PROCESSED_IDS = 1000
 
 
 # ============================================================
@@ -83,7 +87,6 @@ Identitas utama kamu adalah:
 Jika pengguna bertanya siapa yang mengembangkan RoboMANTAP,
 jawab bahwa RoboMANTAP dikembangkan oleh U.Project Nexus.
 
-
 ============================================================
 PERAN UTAMA
 ============================================================
@@ -101,7 +104,6 @@ Prioritas bantuan:
 7. Memberikan strategi belajar yang relevan.
 8. Membantu pengguna memahami cara menggunakan RoboMANTAP.
 
-
 ============================================================
 FOKUS PEMBELAJARAN
 ============================================================
@@ -113,7 +115,6 @@ RoboMANTAP dapat membantu berbagai bidang pembelajaran, termasuk:
 - Agama Islam & Keagamaan
 - IPS, Geografi, Ekonomi, Sejarah
 - Penalaran, Logika, Latihan Soal, & Strategi Belajar
-
 
 ============================================================
 FORMAT PENULISAN MATEMATIKA, ILMIAH & UMUM (KHUSUS WHATSAPP)
@@ -149,21 +150,16 @@ Gunakan karakter Unicode & teks biasa yang bersih:
    - Pertidaksamaan & Relasi: <, >, ≤, ≥, ≠, ≈, ∞
    - Derajat & Simbol Lain: °, °C, π, θ, α, β
 
-6. Penekanan Teks WhatsApp:
-   - Gunakan bold WhatsApp (*teks*) untuk hasil akhir atau persamaan penting.
-   - Contoh: *x = -4* atau *2⁴ = 16*
-
-
 ============================================================
 FORMAT PENULISAN BAHASA ARAB
 ============================================================
 
-1. Untuk ayat Al-Qur'an, doa, atau istilah Arab, gunakan teks Arab Unicode yang jelas.
-2. Sertakan harakat lengkap jika diperlukan untuk kejelasan bacaan.
-3. Selalu sertakan terjemahan atau arti dalam Bahasa Indonesia di bawah teks Arab.
+1. Untuk ayat Al-Qur'an, doa, atau istilah Arab, gunakan teks Arab yang jelas.
+2. Sertakan harakat lengkap untuk kejelasan bacaan.
+3. Selalu sertakan terjemahan atau arti dalam Bahasa Indonesia di bawah teks Arab dalam format garis miring.
    Contoh:
    الْحَمْدُ لِلَّهِ رَبِّ الْعَالَمِينَ
-   (Segala puji bagi Allah, Tuhan seluruh alam)
+   _Segala puji bagi Allah, Tuhan seluruh alam_
 
 
 ============================================================
@@ -292,21 +288,21 @@ def get_gemini_keys():
 
 
 # ============================================================
-# TEXT SANITIZER FOR WHATSAPP (PURGE LATEX)
+# TEXT SANITIZER FOR WHATSAPP (PURGE LATEX & FIX BOLD)
 # ============================================================
 
 def format_text_for_whatsapp(text: str) -> str:
     """
     Pembersih otomatis untuk mengubah sisa sintaks LaTeX
-    menjadi karakter Unicode yang rapi di WhatsApp.
+    menjadi karakter Unicode yang rapi di WhatsApp,
     """
     if not text:
         return text
 
-    # 1. Hapus tanda dolar ($)
+    # Hapus tanda dolar ($)
     text = text.replace("$", "")
 
-    # 2. Replace perintah LaTeX umum ke Unicode
+    # Replace perintah LaTeX umum ke Unicode
     latex_replacements = {
         r"\times": "×",
         r"\div": "÷",
@@ -329,14 +325,14 @@ def format_text_for_whatsapp(text: str) -> str:
     for cmd, unicode_char in latex_replacements.items():
         text = text.replace(cmd, unicode_char)
 
-    # 3. Ubah \sqrt{x} menjadi √(x)
+    # Ubah \sqrt{x} menjadi √(x)
     text = re.sub(r"\\sqrt\{([^}]+)\}", r"√(\1)", text)
     text = re.sub(r"\\sqrt\s*([a-zA-Z0-9]+)", r"√\1", text)
 
-    # 4. Ubah \frac{a}{b} menjadi (a) / (b)
+    # Ubah \frac{a}{b} menjadi (a) / (b)
     text = re.sub(r"\\frac\{([^}]+)\}\{([^}]+)\}", r"(\1) / (\2)", text)
 
-    # 5. Ubah simbol caret (^) ke angka pangkat Unicode
+    # Ubah simbol caret (^) ke angka pangkat Unicode
     power_map = {
         "^0": "⁰", "^1": "¹", "^2": "²", "^3": "³", "^4": "⁴",
         "^5": "⁵", "^6": "⁶", "^7": "⁷", "^8": "⁸", "^9": "⁹",
@@ -345,7 +341,7 @@ def format_text_for_whatsapp(text: str) -> str:
     for caret, super_char in power_map.items():
         text = text.replace(caret, super_char)
 
-    # 6. Bersihkan sisa backslash (\) kata LaTeX yang tertinggal
+    # Bersihkan sisa backslash (\) kata LaTeX yang tertinggal
     text = re.sub(r"\\([a-zA-Z]+)", r"\1", text)
 
     return text.strip()
@@ -469,8 +465,30 @@ def generate_ai_response(user_id: str, prompt_text: str) -> str:
 
 
 # ============================================================
-# WHATSAPP MESSAGE SENDER
+# WHATSAPP UTILITIES & MESSAGE SENDER
 # ============================================================
+
+def mark_message_as_read(message_id: str):
+    """Mengubah centang pesan masuk menjadi CENTANG BIRU secara instan."""
+    if not WHATSAPP_TOKEN or not PHONE_NUMBER_ID or not message_id:
+        return
+
+    url = f"https://graph.facebook.com/v18.0/{PHONE_NUMBER_ID}/messages"
+    headers = {
+        "Authorization": f"Bearer {WHATSAPP_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "messaging_product": "whatsapp",
+        "status": "read",
+        "message_id": message_id
+    }
+
+    try:
+        requests.post(url, json=payload, headers=headers, timeout=5)
+    except Exception as e:
+        print(f"LOG ERROR Mark as Read: {e}")
+
 
 def send_whatsapp_message(
     to_phone: str,
@@ -541,6 +559,29 @@ def send_whatsapp_message(
 
 
 # ============================================================
+# ASYNC BACKGROUND WORKER
+# ============================================================
+
+def process_message_background(message_id: str, from_number: str, user_text: str):
+    """
+    Menjalankan proses AI & kirim balasan di latar belakang
+    sehingga endpoint HTTP bisa langsung membalas 200 OK ke Meta.
+    """
+    try:
+        # 1. Tandai centang biru
+        mark_message_as_read(message_id)
+
+        # 2. Hasilkan AI Response
+        ai_reply = generate_ai_response(from_number, user_text)
+
+        # 3. Kirim ke WhatsApp
+        send_whatsapp_message(from_number, ai_reply)
+
+    except Exception as e:
+        print(f"LOG ERROR in Background Worker: {e}")
+
+
+# ============================================================
 # ROOT ENDPOINT
 # ============================================================
 
@@ -574,11 +615,11 @@ async def verify_webhook(request: Request):
 
 
 # ============================================================
-# WHATSAPP INCOMING WEBHOOK
+# WHATSAPP INCOMING WEBHOOK (ASYNC BACKGROUND TASK)
 # ============================================================
 
 @app.post("/webhook")
-async def receive_whatsapp(request: Request):
+async def receive_whatsapp(request: Request, background_tasks: BackgroundTasks):
     try:
         data = await request.json()
         print(f"LOG Incoming Webhook Payload: {data}")
@@ -603,29 +644,35 @@ async def receive_whatsapp(request: Request):
             print(f"LOG Ignored message type: {message.get('type')}")
             return {"status": "ignored", "reason": "non_text_message"}
 
+        message_id = message.get("id")
         from_number = message.get("from")
-        if not from_number:
-            print("LOG ERROR: sender number tidak ditemukan.")
+        user_text = message.get("text", {}).get("body", "").strip()
+
+        if not from_number or not user_text:
             return {"status": "ignored"}
 
-        message_data = message.get("text", {})
-        user_text = message_data.get("body", "").strip()
+        # DEDUPLIKASI: Jika message_id sudah pernah diproses, abaikan retry dari Meta
+        if message_id in PROCESSED_MESSAGE_IDS:
+            print(f"LOG DUP IGNORED -> Message ID: {message_id} (Meta Retry)")
+            return {"status": "ignored", "reason": "duplicate_message"}
 
-        if not user_text:
-            return {"status": "ignored"}
+        # Catat ID pesan ke set agar percakapan ulang terblokir
+        if message_id:
+            PROCESSED_MESSAGE_IDS.add(message_id)
+            if len(PROCESSED_MESSAGE_IDS) > MAX_PROCESSED_IDS:
+                PROCESSED_MESSAGE_IDS.clear()
 
         print(f"LOG Incoming Message -> {from_number}: {user_text}")
 
-        ai_reply = generate_ai_response(
+        # LEMPAR PROSES KE BACKGROUND TASK & LANGSUNG RETUR 200 OK KE META
+        background_tasks.add_task(
+            process_message_background,
+            message_id,
             from_number,
             user_text
         )
 
-        print(f"LOG AI Reply -> {ai_reply[:100]}")
-
-        send_whatsapp_message(from_number, ai_reply)
-
-        return {"status": "success"}
+        return {"status": "success", "message": "queued"}
 
     except Exception as e:
         print(f"LOG ERROR Processing Webhook: {e}")
