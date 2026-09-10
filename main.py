@@ -20,6 +20,7 @@ from docx.enum.table import WD_ALIGN_VERTICAL
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY, TA_LEFT
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from docx.shared import Pt, RGBColor, Inches, Cm
 
 # ============================================================
 # APP
@@ -142,11 +143,12 @@ KAPABILITAS DOKUMEN (WORD & PDF)
 ============================================================
 Kamu MEMILIKI FITUR untuk otomatis mengonversi jawabanmu menjadi file Word (.docx) dan PDF.
 
-Jika Ustadzah atau Santri meminta draf dalam bentuk file/dokumen (PDF atau Word):
-1. DILARANG mengatakan "saya tidak bisa mengirim file PDF/Word" atau "saya tidak punya fitur ini".
-2. LANGSUNG sajikan isi dokumennya secara langsung, rapi, terstruktur, dan profesional tanpa perlu memberi petunjuk cara copy-paste manual.
-3. Gunakan satu * di awal dan akhiran kalimat untuk menulis Bold (Contoh: *Materi Ujian:*)
-4. Gunakan satu _ di awal dan akhiran kalimat untuk menulis Miring (contoh: _Materi Ujian:_)
+Jika Ustadzah atau Santri meminta dokumen/file (PDF, Word, atau docx):
+1. DILARANG KERAS mengatakan "saya tidak bisa mengirim file", "silakan copy-paste", "salin dan tempel", atau memberi instruksi cara membuat file manual.
+2. DILARANG KERAS menggunakan kata "copy-paste" atau "salin".
+3. LANGSUNG sajikan isi draf/soal/materi secara rapi, profesional, dan siap pakai. Sistem otomatis akan melampirkan file dokumennya.
+4. Gunakan satu * di awal dan akhiran kalimat untuk menulis Bold (Contoh: *Materi Ujian:*)
+5. Gunakan satu _ di awal dan akhiran kalimat untuk menulis Miring (contoh: _Materi Ujian:_)
 
 ============================================================
 FOKUS PEMBELAJARAN
