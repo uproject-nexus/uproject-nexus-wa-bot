@@ -350,21 +350,21 @@ def format_text_for_whatsapp(text: str) -> str:
 # ============================================================
 # GEMINI RESPONSE WITH HISTORY & THINKING CONFIG
 # ============================================================
-
-def generate_ai_response(user_id: str, prompt_text: str) -> str:
+def generate_ai_response(
+    user_id: str, 
+    prompt_text: str, 
+    image_bytes: bytes = None, 
+    mime_type: str = None
+) -> str:
     keys = get_gemini_keys()
 
     if not keys:
         print("LOG ERROR: Tidak ada Gemini API Key.")
-        return (
-            "Maaf, sistem AI RoboMANTAP sedang belum terhubung. "
-            "Silakan coba beberapa saat lagi."
-        )
+        return "Maaf, sistem AI RoboMANTAP sedang belum terhubung. Silakan coba beberapa saat lagi."
 
-    if not prompt_text or not prompt_text.strip():
-        return (
-            "Silakan tuliskan pertanyaan atau materi yang ingin kamu pelajari. 😊"
-        )
+    # Jika pesan teks dan gambar dua-duanya kosong
+    if not prompt_text and not image_bytes:
+        return "Silakan kirimkan foto soal atau pertanyaan yang ingin kamu pelajari. 😊"
 
     user_history = CHAT_HISTORIES.get(user_id, [])
 
@@ -383,13 +383,12 @@ def generate_ai_response(user_id: str, prompt_text: str) -> str:
                 f"LOG Gemini Attempt -> "
                 f"User: {user_id} | "
                 f"Model: {selected_model} | "
-                f"Key: {selected_key[:6]}..."
+                f"Has Image: {bool(image_bytes)}"
             )
 
             client = genai.Client(api_key=selected_key)
             config = _stream_config(selected_model)
 
-            # Konversi riwayat ke objek types.Content
             formatted_history = []
             for item in user_history:
                 formatted_history.append(
@@ -405,7 +404,19 @@ def generate_ai_response(user_id: str, prompt_text: str) -> str:
                 history=formatted_history
             )
 
-            response = chat.send_message(prompt_text)
+            # SUSUN PESAN MASUK (TEKS + GAMBAR JIKA ADA)
+            content_parts = []
+
+            if image_bytes and mime_type:
+                image_part = types.Part.from_bytes(data=image_bytes, mime_type=mime_type)
+                content_parts.append(image_part)
+
+            default_prompt = "Tolong bantu baca, jelaskan, dan selesaikan materi atau soal yang ada pada gambar ini secara terstruktur dan jelas."
+            final_prompt = prompt_text if prompt_text else default_prompt
+            content_parts.append(final_prompt)
+
+            # Kirim request ke Gemini
+            response = chat.send_message(content_parts)
 
             if not response:
                 raise RuntimeError("Gemini returned empty response.")
@@ -417,7 +428,7 @@ def generate_ai_response(user_id: str, prompt_text: str) -> str:
 
             cleaned_text = format_text_for_whatsapp(text)
 
-            # Update riwayat percakapan
+            # Update History
             updated_history = []
             for msg in chat.get_history():
                 parts_text = []
@@ -436,32 +447,15 @@ def generate_ai_response(user_id: str, prompt_text: str) -> str:
 
             CHAT_HISTORIES[user_id] = updated_history
 
-            print(
-                f"LOG Gemini SUCCESS -> "
-                f"User: {user_id} | "
-                f"Model: {selected_model} | "
-                f"History count: {len(updated_history)}"
-            )
-
             return cleaned_text
 
         except Exception as e:
             last_error = e
-            print(
-                f"LOG Gemini FAILED -> "
-                f"Model: {selected_model} | "
-                f"Error: {e}"
-            )
+            print(f"LOG Gemini FAILED -> Model: {selected_model} | Error: {e}")
             continue
 
     print(f"LOG Gemini ALL ATTEMPTS FAILED: {last_error}")
-
-    return (
-        "Mohon maaf 🙏\n\n"
-        "RoboMANTAP sedang mengalami gangguan sementara "
-        "pada layanan AI.\n\n"
-        "Silakan kirim kembali pesan Anda beberapa saat lagi."
-    )
+    return "Mohon maaf 🙏\n\nRoboMANTAP sedang mengalami gangguan sementara pada layanan AI."
 
 
 # ============================================================
@@ -489,7 +483,40 @@ def mark_message_as_read(message_id: str):
     except Exception as e:
         print(f"LOG ERROR Mark as Read: {e}")
 
+def download_whatsapp_media(media_id: str) -> tuple[bytes, str]:
+    """
+    Mengunduh file gambar dari server Meta WhatsApp API berdasarkan media_id.
+    Mengembalikan (binary_bytes, mime_type).
+    """
+    if not WHATSAPP_TOKEN or not media_id:
+        return None, None
 
+    try:
+        # Step 1: Dapatkan URL unduhan file dari Meta API
+        url = f"https://graph.facebook.com/v18.0/{media_id}"
+        headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
+        res = requests.get(url, headers=headers, timeout=10)
+
+        if res.status_code != 200:
+            print(f"LOG ERROR Get Media URL: {res.text}")
+            return None, None
+
+        media_info = res.json()
+        download_url = media_info.get("url")
+        mime_type = media_info.get("mime_type", "image/jpeg")
+
+        # Step 2: Unduh bytes gambar dari URL
+        res_media = requests.get(download_url, headers=headers, timeout=15)
+        if res_media.status_code != 200:
+            print(f"LOG ERROR Download Media Content: {res_media.status_code}")
+            return None, None
+
+        return res_media.content, mime_type
+
+    except Exception as e:
+        print(f"LOG ERROR in download_whatsapp_media: {e}")
+        return None, None
+        
 def send_whatsapp_message(
     to_phone: str,
     message_text: str
@@ -561,25 +588,33 @@ def send_whatsapp_message(
 # ============================================================
 # ASYNC BACKGROUND WORKER
 # ============================================================
-
-def process_message_background(message_id: str, from_number: str, user_text: str):
-    """
-    Menjalankan proses AI & kirim balasan di latar belakang
-    sehingga endpoint HTTP bisa langsung membalas 200 OK ke Meta.
-    """
+def process_message_background(
+    message_id: str, 
+    from_number: str, 
+    user_text: str, 
+    image_id: str = None
+):
     try:
-        # 1. Tandai centang biru
         mark_message_as_read(message_id)
 
-        # 2. Hasilkan AI Response
-        ai_reply = generate_ai_response(from_number, user_text)
+        image_bytes = None
+        mime_type = None
 
-        # 3. Kirim ke WhatsApp
+        # Jika ada image_id, unduh gambarnya dulu
+        if image_id:
+            image_bytes, mime_type = download_whatsapp_media(image_id)
+
+        ai_reply = generate_ai_response(
+            from_number, 
+            user_text, 
+            image_bytes=image_bytes, 
+            mime_type=mime_type
+        )
+
         send_whatsapp_message(from_number, ai_reply)
 
     except Exception as e:
         print(f"LOG ERROR in Background Worker: {e}")
-
 
 # ============================================================
 # ROOT ENDPOINT
@@ -617,12 +652,10 @@ async def verify_webhook(request: Request):
 # ============================================================
 # WHATSAPP INCOMING WEBHOOK (ASYNC BACKGROUND TASK)
 # ============================================================
-
 @app.post("/webhook")
 async def receive_whatsapp(request: Request, background_tasks: BackgroundTasks):
     try:
         data = await request.json()
-        print(f"LOG Incoming Webhook Payload: {data}")
 
         entries = data.get("entry", [])
         if not entries:
@@ -639,41 +672,51 @@ async def receive_whatsapp(request: Request, background_tasks: BackgroundTasks):
             return {"status": "ignored"}
 
         message = messages[0]
+        msg_type = message.get("type")
 
-        if message.get("type") != "text":
-            print(f"LOG Ignored message type: {message.get('type')}")
-            return {"status": "ignored", "reason": "non_text_message"}
+        # HANYA PROSES TIPE TEXT DAN IMAGE
+        if msg_type not in ["text", "image"]:
+            print(f"LOG Ignored message type: {msg_type}")
+            return {"status": "ignored", "reason": "unsupported_message_type"}
 
         message_id = message.get("id")
         from_number = message.get("from")
-        user_text = message.get("text", {}).get("body", "").strip()
+        
+        user_text = ""
+        image_id = None
 
-        if not from_number or not user_text:
+        if msg_type == "text":
+            user_text = message.get("text", {}).get("body", "").strip()
+        elif msg_type == "image":
+            image_id = message.get("image", {}).get("id")
+            # Keterangan/Caption foto yang ditulis siswa (opsional)
+            user_text = message.get("image", {}).get("caption", "").strip()
+
+        if not from_number:
             return {"status": "ignored"}
 
-        # DEDUPLIKASI: Jika message_id sudah pernah diproses, abaikan retry dari Meta
+        # Deduplikasi
         if message_id in PROCESSED_MESSAGE_IDS:
-            print(f"LOG DUP IGNORED -> Message ID: {message_id} (Meta Retry)")
             return {"status": "ignored", "reason": "duplicate_message"}
 
-        # Catat ID pesan ke set agar percakapan ulang terblokir
         if message_id:
             PROCESSED_MESSAGE_IDS.add(message_id)
             if len(PROCESSED_MESSAGE_IDS) > MAX_PROCESSED_IDS:
                 PROCESSED_MESSAGE_IDS.clear()
 
-        print(f"LOG Incoming Message -> {from_number}: {user_text}")
+        print(f"LOG Incoming Message -> {from_number} | Type: {msg_type}")
 
-        # LEMPAR PROSES KE BACKGROUND TASK & LANGSUNG RETUR 200 OK KE META
+        # Jalankan di Background Task
         background_tasks.add_task(
             process_message_background,
             message_id,
             from_number,
-            user_text
+            user_text,
+            image_id
         )
 
         return {"status": "success", "message": "queued"}
 
     except Exception as e:
         print(f"LOG ERROR Processing Webhook: {e}")
-        return {"status": "error", "message": "Webhook processed with error"}
+        return {"status": "error"}
