@@ -1,10 +1,16 @@
 import os
 import re
+import io
 import random
 import requests
 from fastapi import FastAPI, Request, Response, BackgroundTasks
 from google import genai
 from google.genai import types
+from docx import Document
+from reportlab.lib.pagesizes import letter
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+
 
 
 # ============================================================
@@ -141,6 +147,7 @@ FORMAT PENGUMUMAN / BROADCAST USTADZAH
 Jika Ustadzah meminta dibuatkan draf pengumuman, broadcast, edaran, atau pesan grup:
 
 WAJIB gunakan struktur template baku berikut:
+- Berikan emote yang sesuai. Jangan terlalu banyak, cukup emote di kalimat yang diperlukan.
 
 السَّلاَمُ عَلَيْكُمْ وَرَحْمَةُ اللهِ وَبَرَكَاتُهُ
 _Assalamu’alaikum Warahmatullahi Wabarakatuh_ (Dalam format miring)
@@ -561,7 +568,6 @@ def process_message_background(
         image_bytes = None
         mime_type = None
 
-        # Jika ada image_id, unduh gambarnya dulu
         if image_id:
             image_bytes, mime_type = download_whatsapp_media(image_id)
 
@@ -572,7 +578,33 @@ def process_message_background(
             mime_type=mime_type
         )
 
+        # 1. Kirim balasan teks utama di WhatsApp
         send_whatsapp_message(from_number, ai_reply)
+
+        # 2. Deteksi jika pengguna meminta dokumen Word atau PDF
+        text_lower = user_text.lower()
+        
+        if "word" in text_lower or "docx" in text_lower:
+            file_bytes = create_word_docx(ai_reply)
+            filename = "Dokumen_RoboMANTAP.docx"
+            media_id = upload_media_to_whatsapp(
+                file_bytes, 
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document", 
+                filename
+            )
+            if media_id:
+                send_whatsapp_document(from_number, media_id, filename, caption="Berikut dokumen Word pesanan Ustadzah/Santri 📄")
+
+        elif "pdf" in text_lower:
+            file_bytes = create_pdf_doc(ai_reply)
+            filename = "Dokumen_RoboMANTAP.pdf"
+            media_id = upload_media_to_whatsapp(
+                file_bytes, 
+                "application/pdf", 
+                filename
+            )
+            if media_id:
+                send_whatsapp_document(from_number, media_id, filename, caption="Berikut dokumen PDF pesanan Ustadzah/Santri 📄")
 
     except Exception as e:
         print(f"LOG ERROR in Background Worker: {e}")
@@ -580,7 +612,6 @@ def process_message_background(
 # ============================================================
 # ROOT ENDPOINT
 # ============================================================
-
 @app.get("/")
 async def root():
     return {
@@ -593,7 +624,6 @@ async def root():
 # ============================================================
 # META WEBHOOK VERIFICATION
 # ============================================================
-
 @app.get("/webhook")
 async def verify_webhook(request: Request):
     params = request.query_params
@@ -681,3 +711,117 @@ async def receive_whatsapp(request: Request, background_tasks: BackgroundTasks):
     except Exception as e:
         print(f"LOG ERROR Processing Webhook: {e}")
         return {"status": "error"}
+
+
+# ============================================================
+# DOCUMENT GENERATOR HELPER (WORD & PDF)
+# ============================================================
+def create_word_docx(text_content: str) -> bytes:
+    """Mengubah teks jawaban AI menjadi file Word (.docx) dalam memori."""
+    doc = Document()
+    doc.add_heading("RoboMANTAP - Dokumen Ajar", level=1)
+    
+    lines = text_content.split("\n")
+    for line in lines:
+        line_str = line.strip()
+        if not line_str:
+            continue
+        if line_str.startswith("*") and line_str.endswith("*"):
+            doc.add_heading(line_str.replace("*", ""), level=2)
+        elif line_str.startswith("• "):
+            doc.add_paragraph(line_str.replace("• ", ""), style="List Bullet")
+        else:
+            doc.add_paragraph(line_str.replace("*", ""))
+
+    target_stream = io.BytesIO()
+    doc.save(target_stream)
+    return target_stream.getvalue()
+
+
+def create_pdf_doc(text_content: str) -> bytes:
+    """Mengubah teks jawaban AI menjadi file PDF dalam memori."""
+    target_stream = io.BytesIO()
+    doc = SimpleDocTemplate(target_stream, pagesize=letter)
+    styles = getSampleStyleSheet()
+    
+    story = []
+    title_style = styles["Heading1"]
+    body_style = ParagraphStyle(
+        'PDFBody',
+        parent=styles['Normal'],
+        fontSize=10,
+        leading=14,
+        spaceAfter=6
+    )
+
+    story.append(Paragraph("<b>RoboMANTAP - Dokumen Ajar</b>", title_style))
+    story.append(Spacer(1, 12))
+
+    lines = text_content.split("\n")
+    for line in lines:
+        clean_line = line.strip()
+        if not clean_line:
+            continue
+        # Konversi format bold WhatsApp ke HTML tag untuk PDF
+        clean_line = re.sub(r"\*([^*]+)\*", r"<b>\1</b>", clean_line)
+        clean_line = re.sub(r"_([^_]+)_", r"<i>\1</i>", clean_line)
+        
+        story.append(Paragraph(clean_line, body_style))
+
+    doc.build(story)
+    return target_stream.getvalue()
+
+
+# ============================================================
+# UPLOAD MEDIA & SEND DOCUMENT TO WHATSAPP API
+# ============================================================
+
+def upload_media_to_whatsapp(file_bytes: bytes, mime_type: str, filename: str) -> str:
+    """Mengunggah file ke Meta WhatsApp Media API untuk mendapatkan media_id."""
+    if not WHATSAPP_TOKEN or not PHONE_NUMBER_ID:
+        return None
+
+    url = f"https://graph.facebook.com/v18.0/{PHONE_NUMBER_ID}/media"
+    headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
+    
+    files = {
+        "file": (filename, file_bytes, mime_type),
+        "messaging_product": (None, "whatsapp")
+    }
+
+    try:
+        res = requests.post(url, headers=headers, files=files, timeout=30)
+        if res.status_code == 200:
+            return res.json().get("id")
+        print(f"LOG ERROR Upload Media: {res.text}")
+        return None
+    except Exception as e:
+        print(f"LOG ERROR upload_media_to_whatsapp: {e}")
+        return None
+
+
+def send_whatsapp_document(to_phone: str, media_id: str, filename: str, caption: str = ""):
+    """Mengirimkan file dokumen (Word/PDF) ke pengguna WhatsApp."""
+    if not WHATSAPP_TOKEN or not PHONE_NUMBER_ID or not media_id:
+        return
+
+    url = f"https://graph.facebook.com/v18.0/{PHONE_NUMBER_ID}/messages"
+    headers = {
+        "Authorization": f"Bearer {WHATSAPP_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": to_phone,
+        "type": "document",
+        "document": {
+            "id": media_id,
+            "filename": filename,
+            "caption": caption
+        }
+    }
+
+    try:
+        requests.post(url, json=payload, headers=headers, timeout=20)
+    except Exception as e:
+        print(f"LOG ERROR send_whatsapp_document: {e}")
