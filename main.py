@@ -613,7 +613,7 @@ def process_message_background(
                 filename
             )
             if media_id:
-                send_whatsapp_document(from_number, media_id, filename, caption="Berikut dokumen Word pesanan Ustadzah/Santri 📄")
+                send_whatsapp_document(from_number, media_id, filename, caption="Berikut dokumen Word-nya 📄✨")
 
         elif "pdf" in text_lower:
             file_bytes = create_pdf_doc(ai_reply)
@@ -624,7 +624,7 @@ def process_message_background(
                 filename
             )
             if media_id:
-                send_whatsapp_document(from_number, media_id, filename, caption="Berikut dokumen PDF pesanan Ustadzah/Santri 📄")
+                send_whatsapp_document(from_number, media_id, filename, caption="Berikut dokumen PDF-nya 📄✨")
 
     except Exception as e:
         print(f"LOG ERROR in Background Worker: {e}")
