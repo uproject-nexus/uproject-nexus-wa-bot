@@ -30,7 +30,7 @@ def generate_ai_response(prompt_text):
     try:
         genai.configure(api_key=selected_key)
         # Menggunakan model Flash-Lite gratis
-        model = genai.GenerativeModel("gemini-2.5-flash-lite")
+        model = genai.GenerativeModel("gemini-3.5-flash-lite")
         
         system_instruction = (
             "Anda adalah Asisten AI U.Project Nexus (RoboMANTAP) untuk Madrasah Al-Irsyad Al-Islamiyah Putri Bondowoso. "
