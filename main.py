@@ -111,6 +111,11 @@ ATURAN SEBUTAN & HUKUM KOMUNIKASI
      (Contoh: "Semangat belajar ya Santri Hebat! Mari kita bedah soal ini bersama-sama🌸").
    - Gunakan gaya bahasa yang ramah, ceria, santun, sabar, dan membimbing secara bertahap.
 
+3. PENANGANAN LKPD (LEMBAR KERJA PESERTA DIDIK):
+   - Jika Ustadzah menyinggung, menanyakan, atau meminta "LKPD":
+   - Arahkan dengan santun dan takzim ke Dashboard *GuruMANTAP* dengan link: https://robomantap-intelligence.streamlit.app/
+   - Informasikan bahwa tautan resmi dashboard dapat diakses langsung melalui **deskripsi profil WhatsApp RoboMANTAP**.
+
 ============================================================
 SAPAAN PERTAMA
 ============================================================
@@ -138,8 +143,10 @@ KAPABILITAS DOKUMEN (WORD & PDF)
 Kamu MEMILIKI FITUR untuk otomatis mengonversi jawabanmu menjadi file Word (.docx) dan PDF.
 
 Jika Ustadzah atau Santri meminta draf dalam bentuk file/dokumen (PDF atau Word):
-1. DILARANG KERAS mengatakan "saya tidak bisa mengirim file PDF/Word" atau "saya tidak punya fitur ini".
+1. DILARANG mengatakan "saya tidak bisa mengirim file PDF/Word" atau "saya tidak punya fitur ini".
 2. LANGSUNG sajikan isi dokumennya secara langsung, rapi, terstruktur, dan profesional tanpa perlu memberi petunjuk cara copy-paste manual.
+3. Gunakan satu * di awal dan akhiran kalimat untuk menulis Bold (Contoh: *Materi Ujian:*)
+4. Gunakan satu _ di awal dan akhiran kalimat untuk menulis Miring (contoh: _Materi Ujian:_)
 
 ============================================================
 FOKUS PEMBELAJARAN
@@ -944,25 +951,42 @@ def create_pdf_doc(text_content: str) -> bytes:
 def upload_media_to_whatsapp(file_bytes: bytes, mime_type: str, filename: str) -> str:
     """Mengunggah file ke Meta WhatsApp Media API untuk mendapatkan media_id."""
     if not WHATSAPP_TOKEN or not PHONE_NUMBER_ID:
+        print("LOG ERROR Upload Media: WHATSAPP_TOKEN atau PHONE_NUMBER_ID belum terpasang.")
         return None
 
     url = f"https://graph.facebook.com/v18.0/{PHONE_NUMBER_ID}/media"
     headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
     
-    files = {
-        "file": (filename, file_bytes, mime_type),
-        "messaging_product": (None, "whatsapp")
+    # PERBAIKAN: messaging_product dikirim sebagai form-data (data), bukan files
+    data_payload = {
+        "messaging_product": "whatsapp"
+    }
+    
+    files_payload = {
+        "file": (filename, file_bytes, mime_type)
     }
 
     try:
-        res = requests.post(url, headers=headers, files=files, timeout=30)
+        res = requests.post(
+            url, 
+            headers=headers, 
+            data=data_payload, 
+            files=files_payload, 
+            timeout=30
+        )
+        print(f"LOG Upload Media Status Code: {res.status_code}")
+        
         if res.status_code == 200:
-            return res.json().get("id")
-        print(f"LOG ERROR Upload Media: {res.text}")
+            media_id = res.json().get("id")
+            print(f"LOG Upload Media SUCCESS -> Media ID: {media_id}")
+            return media_id
+            
+        print(f"LOG ERROR Upload Media Meta Response: {res.text}")
         return None
     except Exception as e:
         print(f"LOG ERROR upload_media_to_whatsapp: {e}")
         return None
+
 
 def send_whatsapp_document(to_phone: str, media_id: str, filename: str, caption: str = ""):
     """Mengirimkan file dokumen (Word/PDF) ke pengguna WhatsApp."""
@@ -986,6 +1010,9 @@ def send_whatsapp_document(to_phone: str, media_id: str, filename: str, caption:
     }
 
     try:
-        requests.post(url, json=payload, headers=headers, timeout=20)
+        res = requests.post(url, json=payload, headers=headers, timeout=20)
+        print(f"LOG Send WA Document Status: {res.status_code}")
+        if res.status_code != 200:
+            print(f"LOG Meta API Error Document: {res.text}")
     except Exception as e:
         print(f"LOG ERROR send_whatsapp_document: {e}")
