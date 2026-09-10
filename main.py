@@ -601,10 +601,16 @@ def process_message_background(
         # 1. Kirim balasan teks utama di WhatsApp
         send_whatsapp_message(from_number, ai_reply)
 
-        # 2. Deteksi jika pengguna meminta dokumen Word atau PDF
+        # SESUDAH (Dengan daftar kata kunci lebih lengkap):
         text_lower = user_text.lower()
         
-        if "word" in text_lower or "docx" in text_lower:
+        # Kata kunci pemicu dokumen Word (.docx)
+        word_triggers = ["word", "docx", "doc", "ms word", "microsoft word", "file word", "dokumen word"]
+        
+        # Kata kunci pemicu dokumen PDF (.pdf)
+        pdf_triggers = ["pdf", "file pdf", "dokumen pdf"]
+        
+        if any(trigger in text_lower for trigger in word_triggers):
             file_bytes = create_word_docx(ai_reply)
             filename = "Dokumen_RoboMANTAP.docx"
             media_id = upload_media_to_whatsapp(
@@ -614,8 +620,8 @@ def process_message_background(
             )
             if media_id:
                 send_whatsapp_document(from_number, media_id, filename, caption="Berikut dokumen Word-nya 📄✨")
-
-        elif "pdf" in text_lower:
+        
+        elif any(trigger in text_lower for trigger in pdf_triggers):
             file_bytes = create_pdf_doc(ai_reply)
             filename = "Dokumen_RoboMANTAP.pdf"
             media_id = upload_media_to_whatsapp(
