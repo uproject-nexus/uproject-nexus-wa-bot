@@ -2,3 +2,5 @@ fastapi
 uvicorn
 requests
 google-genai
+python-docx
+reportlab
