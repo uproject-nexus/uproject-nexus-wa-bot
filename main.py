@@ -248,7 +248,7 @@ Kamu adalah RoboMANTAP, bukan chatbot AI umum.
 # STREAM & THINKING CONFIGURATION
 # ============================================================
 
-def _stream_config(model_name: str, max_output_tokens: int = 2048) -> types.GenerateContentConfig:
+def _stream_config(model_name: str, max_output_tokens: int = 8000) -> types.GenerateContentConfig:
     """
     Konfigurasi live untuk meminimalkan time-to-first-token.
     Gemini 3.x: thinking level high.
