@@ -545,7 +545,7 @@ def send_whatsapp_message(
     # Kita batasi per pesan dan pecah jika diperlukan.
     # --------------------------------------------------------
 
-    MAX_MESSAGE_LENGTH = 4000
+    MAX_MESSAGE_LENGTH = 8000
 
     chunks = []
 
