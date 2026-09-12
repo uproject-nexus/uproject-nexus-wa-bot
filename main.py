@@ -609,10 +609,15 @@ def process_message_background(
         # 1. Kirim balasan teks utama di WhatsApp
         send_whatsapp_message(from_number, ai_reply)
 
+        # Gabungkan teks user dan balasan AI untuk mendeteksi perintah dokumen (sangat berguna untuk Voice Note)
         text_lower = (user_text + " " + ai_reply).lower()
         
-        # Kata kunci pemicu dokumen Word (.docx)
-        word_triggers = ["word", "docx", "doc", "ms word", "microsoft word", "file word", "dokumen word"]
+        # Kata kunci pemicu dokumen Word (.docx) (Ditambah kata kunci umum sebagai default)
+        word_triggers = [
+            "word", "docx", "doc", "ms word", "microsoft word", 
+            "file word", "dokumen word", "format dokumen", 
+            "bentuk dokumen", "file dokumen", "diunduh dokumen"
+        ]
         
         # Kata kunci pemicu dokumen PDF (.pdf)
         pdf_triggers = ["pdf", "file pdf", "dokumen pdf"]
@@ -638,6 +643,7 @@ def process_message_background(
             )
             if media_up_id:
                 send_whatsapp_document(from_number, media_up_id, filename, caption="Berikut dokumen PDF-nya 📄✨")
+
 
     except Exception as e:
         print(f"LOG ERROR in Background Worker: {e}")
