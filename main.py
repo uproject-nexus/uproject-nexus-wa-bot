@@ -331,7 +331,6 @@ def format_text_for_whatsapp(text: str) -> str:
 
     return text.strip()
 
-
 # ============================================================
 # GEMINI RESPONSE WITH HISTORY & THINKING CONFIG
 # ============================================================
@@ -347,9 +346,9 @@ def generate_ai_response(
         print("LOG ERROR: Tidak ada Gemini API Key.")
         return "Maaf, sistem AI RoboMANTAP sedang belum terhubung. Silakan coba beberapa saat lagi."
 
-    # Jika pesan teks dan media dua-duanya kosong
+    # PERUBAHAN 1: Tambahkan kata "dokumen" pada pesan default
     if not prompt_text and not media_bytes:
-        return "Silakan kirimkan pesan teks, Voice Note (VN), atau foto yang ingin kamu bahas. 😊"
+        return "Silakan kirimkan pesan teks, Voice Note (VN), foto, atau dokumen (PDF/Word) yang ingin kamu bahas. 😊"
 
     user_history = CHAT_HISTORIES.get(user_id, [])
 
@@ -396,10 +395,12 @@ def generate_ai_response(
                 media_part = types.Part.from_bytes(data=media_bytes, mime_type=mime_type)
                 content_parts.append(media_part)
 
-            # Tentukan Prompt berdasarkan tipe media jika user tidak mengirimkan teks (hanya VN atau Foto)
+            # PERUBAHAN 2: Tambahkan logika jika yang dikirim adalah dokumen
             if not prompt_text:
                 if mime_type and "audio" in mime_type:
                     final_prompt = "Tolong dengarkan pesan suara (Voice Note) ini dengan saksama, pahami maksudnya, lalu berikan jawaban, respons, atau penjelasan yang tepat sesuai isi suaranya."
+                elif mime_type and ("pdf" in mime_type or "document" in mime_type or "msword" in mime_type):
+                    final_prompt = "Tolong baca dan analisis isi dokumen ini dengan teliti. Jelaskan poin-poin pentingnya, atau jika ini berisi materi/soal, tolong selesaikan dan berikan pembahasannya secara terstruktur."
                 else:
                     final_prompt = "Tolong bantu baca, jelaskan, dan selesaikan materi atau soal yang ada pada gambar ini secara terstruktur dan jelas."
             else:
@@ -697,7 +698,7 @@ async def receive_whatsapp(request: Request, background_tasks: BackgroundTasks):
         msg_type = message.get("type")
 
         # HANYA PROSES TIPE TEXT, IMAGE, DAN AUDIO (VOICE NOTE)
-        if msg_type not in ["text", "image", "audio"]:
+        if msg_type not in ["text", "image", "audio", "document"]:
             print(f"LOG Ignored message type: {msg_type}")
             return {"status": "ignored", "reason": "unsupported_message_type"}
 
@@ -717,6 +718,10 @@ async def receive_whatsapp(request: Request, background_tasks: BackgroundTasks):
             # Menangkap Voice Note dari WhatsApp
             media_id = message.get("audio", {}).get("id")
             # VN dari Meta umumnya tidak memiliki caption teks
+        elif msg_type == "document":
+            media_id = message.get("document", {}).get("id")
+            # Terkadang pengirim memberikan caption teks pada dokumen
+            user_text = message.get("document", {}).get("caption", "").strip()
 
         if not from_number:
             return {"status": "ignored"}
