@@ -608,7 +608,7 @@ def process_message_background(
         # 1. Kirim balasan teks utama di WhatsApp
         send_whatsapp_message(from_number, ai_reply)
 
-        text_lower = user_text.lower()
+        text_lower = (user_text + " " + ai_reply).lower()
         
         # Kata kunci pemicu dokumen Word (.docx)
         word_triggers = ["word", "docx", "doc", "ms word", "microsoft word", "file word", "dokumen word"]
