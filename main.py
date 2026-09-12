@@ -3,6 +3,7 @@ import re
 import io
 import random
 import requests
+import html
 from fastapi import FastAPI, Request, Response, BackgroundTasks
 from google import genai
 from google.genai import types
@@ -15,12 +16,11 @@ from reportlab.lib import colors
 from reportlab.lib.units import cm
 from reportlab.lib.pagesizes import A4
 from datetime import datetime, timedelta
-from docx.shared import Pt, RGBColor, Inches
+from docx.shared import Pt, RGBColor, Inches, Cm
 from docx.enum.table import WD_ALIGN_VERTICAL
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY, TA_LEFT
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from docx.shared import Pt, RGBColor, Inches, Cm
 
 # ============================================================
 # APP
@@ -28,7 +28,7 @@ from docx.shared import Pt, RGBColor, Inches, Cm
 app = FastAPI(
     title="RoboMANTAP WhatsApp AI",
     description="WhatsApp AI Assistant for RoboMANTAP",
-    version="1.3.0"
+    version="1.4.0"
 )
 
 # ============================================================
@@ -64,7 +64,6 @@ MODELS = (
     "gemini-3.1-flash-lite",
 )
 
-
 # ============================================================
 # IN-MEMORY CHAT HISTORY & MESSAGE DEDUPLICATION
 # ============================================================
@@ -75,7 +74,6 @@ MAX_HISTORY_LENGTH = 12
 # Mencegah eksekusi ganda jika Meta melakukan retry
 PROCESSED_MESSAGE_IDS = set()
 MAX_PROCESSED_IDS = 1000
-
 
 # ============================================================
 # ROBO MANTAP SYSTEM PROMPT
@@ -136,7 +134,7 @@ Saya siap membantu Ustadzah dan para Santri dalam penyusunan materi & bahan ajar
 ATURAN ALUR CHAT
 ============================================================
 1. Sapaan pertama di atas HANYA dikirim pada pesan pertama saat sesi percakapan baru dimulai.
-2. Jika pengguna langsung memberikan pertanyaan, instruksi lanjutan, atau mengirim foto soal, LANGSUNG jawab poin utamanya tanpa mengulang sapaan perkenalan di atas.
+2. Jika pengguna langsung memberikan pertanyaan, instruksi lanjutan, mengirim Voice Note (VN), atau mengirim foto soal, LANGSUNG jawab poin utamanya tanpa mengulang sapaan perkenalan di atas.
 
 ============================================================
 KAPABILITAS DOKUMEN (WORD & PDF)
@@ -230,7 +228,6 @@ PRIVASI & KEAMANAN
 
 Kamu adalah RoboMANTAP, bukan chatbot AI umum.
 """
-
 
 # ============================================================
 # STREAM & THINKING CONFIGURATION
@@ -341,7 +338,7 @@ def format_text_for_whatsapp(text: str) -> str:
 def generate_ai_response(
     user_id: str, 
     prompt_text: str, 
-    image_bytes: bytes = None, 
+    media_bytes: bytes = None, 
     mime_type: str = None
 ) -> str:
     keys = get_gemini_keys()
@@ -350,9 +347,9 @@ def generate_ai_response(
         print("LOG ERROR: Tidak ada Gemini API Key.")
         return "Maaf, sistem AI RoboMANTAP sedang belum terhubung. Silakan coba beberapa saat lagi."
 
-    # Jika pesan teks dan gambar dua-duanya kosong
-    if not prompt_text and not image_bytes:
-        return "Silakan kirimkan foto soal atau pertanyaan yang ingin kamu pelajari. 😊"
+    # Jika pesan teks dan media dua-duanya kosong
+    if not prompt_text and not media_bytes:
+        return "Silakan kirimkan pesan teks, Voice Note (VN), atau foto yang ingin kamu bahas. 😊"
 
     user_history = CHAT_HISTORIES.get(user_id, [])
 
@@ -371,7 +368,7 @@ def generate_ai_response(
                 f"LOG Gemini Attempt -> "
                 f"User: {user_id} | "
                 f"Model: {selected_model} | "
-                f"Has Image: {bool(image_bytes)}"
+                f"Has Media: {bool(media_bytes)}"
             )
 
             client = genai.Client(api_key=selected_key)
@@ -392,15 +389,22 @@ def generate_ai_response(
                 history=formatted_history
             )
 
-            # SUSUN PESAN MASUK (TEKS + GAMBAR JIKA ADA)
+            # SUSUN PESAN MASUK (TEKS + MEDIA FOTO/VN JIKA ADA)
             content_parts = []
 
-            if image_bytes and mime_type:
-                image_part = types.Part.from_bytes(data=image_bytes, mime_type=mime_type)
-                content_parts.append(image_part)
+            if media_bytes and mime_type:
+                media_part = types.Part.from_bytes(data=media_bytes, mime_type=mime_type)
+                content_parts.append(media_part)
 
-            default_prompt = "Tolong bantu baca, jelaskan, dan selesaikan materi atau soal yang ada pada gambar ini secara terstruktur dan jelas."
-            final_prompt = prompt_text if prompt_text else default_prompt
+            # Tentukan Prompt berdasarkan tipe media jika user tidak mengirimkan teks (hanya VN atau Foto)
+            if not prompt_text:
+                if mime_type and "audio" in mime_type:
+                    final_prompt = "Tolong dengarkan pesan suara (Voice Note) ini dengan saksama, pahami maksudnya, lalu berikan jawaban, respons, atau penjelasan yang tepat sesuai isi suaranya."
+                else:
+                    final_prompt = "Tolong bantu baca, jelaskan, dan selesaikan materi atau soal yang ada pada gambar ini secara terstruktur dan jelas."
+            else:
+                final_prompt = prompt_text
+                
             content_parts.append(final_prompt)
 
             # Kirim request ke Gemini
@@ -471,9 +475,10 @@ def mark_message_as_read(message_id: str):
     except Exception as e:
         print(f"LOG ERROR Mark as Read: {e}")
 
+
 def download_whatsapp_media(media_id: str) -> tuple[bytes, str]:
     """
-    Mengunduh file gambar dari server Meta WhatsApp API berdasarkan media_id.
+    Mengunduh file media (gambar / voice note) dari server Meta WhatsApp API berdasarkan media_id.
     Mengembalikan (binary_bytes, mime_type).
     """
     if not WHATSAPP_TOKEN or not media_id:
@@ -491,9 +496,9 @@ def download_whatsapp_media(media_id: str) -> tuple[bytes, str]:
 
         media_info = res.json()
         download_url = media_info.get("url")
-        mime_type = media_info.get("mime_type", "image/jpeg")
+        mime_type = media_info.get("mime_type", "application/octet-stream")
 
-        # Step 2: Unduh bytes gambar dari URL
+        # Step 2: Unduh bytes media dari URL
         res_media = requests.get(download_url, headers=headers, timeout=15)
         if res_media.status_code != 200:
             print(f"LOG ERROR Download Media Content: {res_media.status_code}")
@@ -505,6 +510,7 @@ def download_whatsapp_media(media_id: str) -> tuple[bytes, str]:
         print(f"LOG ERROR in download_whatsapp_media: {e}")
         return None, None
         
+
 def send_whatsapp_message(
     to_phone: str,
     message_text: str
@@ -580,28 +586,27 @@ def process_message_background(
     message_id: str, 
     from_number: str, 
     user_text: str, 
-    image_id: str = None
+    media_id: str = None
 ):
     try:
         mark_message_as_read(message_id)
 
-        image_bytes = None
+        media_bytes = None
         mime_type = None
 
-        if image_id:
-            image_bytes, mime_type = download_whatsapp_media(image_id)
+        if media_id:
+            media_bytes, mime_type = download_whatsapp_media(media_id)
 
         ai_reply = generate_ai_response(
             from_number, 
             user_text, 
-            image_bytes=image_bytes, 
+            media_bytes=media_bytes, 
             mime_type=mime_type
         )
 
         # 1. Kirim balasan teks utama di WhatsApp
         send_whatsapp_message(from_number, ai_reply)
 
-        # SESUDAH (Dengan daftar kata kunci lebih lengkap):
         text_lower = user_text.lower()
         
         # Kata kunci pemicu dokumen Word (.docx)
@@ -613,24 +618,24 @@ def process_message_background(
         if any(trigger in text_lower for trigger in word_triggers):
             file_bytes = create_word_docx(ai_reply)
             filename = "Dokumen_RoboMANTAP.docx"
-            media_id = upload_media_to_whatsapp(
+            media_up_id = upload_media_to_whatsapp(
                 file_bytes, 
                 "application/vnd.openxmlformats-officedocument.wordprocessingml.document", 
                 filename
             )
-            if media_id:
-                send_whatsapp_document(from_number, media_id, filename, caption="Berikut dokumen Word-nya 📄✨")
+            if media_up_id:
+                send_whatsapp_document(from_number, media_up_id, filename, caption="Berikut dokumen Word-nya 📄✨")
         
         elif any(trigger in text_lower for trigger in pdf_triggers):
             file_bytes = create_pdf_doc(ai_reply)
             filename = "Dokumen_RoboMANTAP.pdf"
-            media_id = upload_media_to_whatsapp(
+            media_up_id = upload_media_to_whatsapp(
                 file_bytes, 
                 "application/pdf", 
                 filename
             )
-            if media_id:
-                send_whatsapp_document(from_number, media_id, filename, caption="Berikut dokumen PDF-nya 📄✨")
+            if media_up_id:
+                send_whatsapp_document(from_number, media_up_id, filename, caption="Berikut dokumen PDF-nya 📄✨")
 
     except Exception as e:
         print(f"LOG ERROR in Background Worker: {e}")
@@ -691,8 +696,8 @@ async def receive_whatsapp(request: Request, background_tasks: BackgroundTasks):
         message = messages[0]
         msg_type = message.get("type")
 
-        # HANYA PROSES TIPE TEXT DAN IMAGE
-        if msg_type not in ["text", "image"]:
+        # HANYA PROSES TIPE TEXT, IMAGE, DAN AUDIO (VOICE NOTE)
+        if msg_type not in ["text", "image", "audio"]:
             print(f"LOG Ignored message type: {msg_type}")
             return {"status": "ignored", "reason": "unsupported_message_type"}
 
@@ -700,14 +705,18 @@ async def receive_whatsapp(request: Request, background_tasks: BackgroundTasks):
         from_number = message.get("from")
         
         user_text = ""
-        image_id = None
+        media_id = None
 
         if msg_type == "text":
             user_text = message.get("text", {}).get("body", "").strip()
         elif msg_type == "image":
-            image_id = message.get("image", {}).get("id")
+            media_id = message.get("image", {}).get("id")
             # Keterangan/Caption foto yang ditulis siswa (opsional)
             user_text = message.get("image", {}).get("caption", "").strip()
+        elif msg_type == "audio":
+            # Menangkap Voice Note dari WhatsApp
+            media_id = message.get("audio", {}).get("id")
+            # VN dari Meta umumnya tidak memiliki caption teks
 
         if not from_number:
             return {"status": "ignored"}
@@ -729,7 +738,7 @@ async def receive_whatsapp(request: Request, background_tasks: BackgroundTasks):
             message_id,
             from_number,
             user_text,
-            image_id
+            media_id
         )
 
         return {"status": "success", "message": "queued"}
@@ -741,9 +750,6 @@ async def receive_whatsapp(request: Request, background_tasks: BackgroundTasks):
 
 # ============================================================
 # DOCUMENT GENERATOR HELPER (WORD & PDF)
-# ============================================================
-# ============================================================
-# HELPER PARSER RUNS UNTUK WORD
 # ============================================================
 def _add_formatted_runs_word(paragraph, text: str):
     """Memecah teks *bold* dan _italic_ menjadi runs yang rapi di python-docx."""
@@ -760,9 +766,6 @@ def _add_formatted_runs_word(paragraph, text: str):
         else:
             paragraph.add_run(token)
 
-# ============================================================
-# WORD DOCUMENT GENERATOR (.DOCX)
-# ============================================================
 def create_word_docx(text_content: str) -> bytes:
     """Mengubah teks jawaban AI menjadi file Word (.docx) dengan layout profesional."""
     doc = Document()
@@ -845,7 +848,6 @@ def create_word_docx(text_content: str) -> bytes:
 # ============================================================
 # PDF DOCUMENT GENERATOR (.PDF)
 # ============================================================
-
 def create_pdf_doc(text_content: str) -> bytes:
     """Mengubah teks jawaban AI menjadi file PDF rapi dengan tata letak presisi."""
     target_stream = io.BytesIO()
