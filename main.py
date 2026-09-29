@@ -4,6 +4,7 @@ import io
 import random
 import requests
 import html
+from supabase import create_client, Client
 from fastapi import FastAPI, Request, Response, BackgroundTasks
 from google import genai
 from google.genai import types
