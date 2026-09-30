@@ -4,6 +4,7 @@ import io
 import random
 import requests
 import html
+from supabase import create_client, Client
 from fastapi import FastAPI, Request, Response, BackgroundTasks
 from google import genai
 from google.genai import types
@@ -41,6 +42,18 @@ VERIFY_TOKEN = os.getenv(
 
 WHATSAPP_TOKEN = os.getenv("WA_ACCESS_TOKEN")
 PHONE_NUMBER_ID = os.getenv("WA_PHONE_NUMBER_ID")
+
+
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY")
+
+supabase_client: Client = None
+if SUPABASE_URL and SUPABASE_KEY:
+    try:
+        supabase_client = create_client(SUPABASE_URL, SUPABASE_KEY)
+        print("LOG: Supabase Client Initialized Successfully")
+    except Exception as e:
+        print(f"LOG ERROR Init Supabase: {e}")
 
 # ============================================================
 # GEMINI API KEY ROTATION
@@ -143,6 +156,42 @@ PROCESSED_MESSAGE_IDS = set()
 MAX_PROCESSED_IDS = 1000
 
 # ============================================================
+# HELPER AUDIT & SUPABASE PROFILE LOOKUP
+# ============================================================
+def save_audit_log(sender_number: str, msg_type: str, user_msg: str, bot_reply: str):
+    """Mencatat setiap transaksi obrolan WA Bot ke database Supabase untuk audit internal."""
+    if not supabase_client:
+        return
+    try:
+        data = {
+            "sender_number": str(sender_number),
+            "message_type": str(msg_type),
+            "user_message": str(user_msg)[:2000] if user_msg else "[MEDIA/NONE]",
+            "bot_response": str(bot_reply)[:4000] if bot_reply else "[NO_RESPONSE]",
+            "status": "SUCCESS"
+        }
+        supabase_client.table("wabot_audit_logs").insert(data).execute()
+        print(f"LOG AUDIT: Success logged for {sender_number}")
+    except Exception as e:
+        print(f"LOG ERROR Audit Save Failed: {e}")
+
+def get_student_profile_data(nama_siswa: str) -> dict | None:
+    """Mengambil data intelligence siswa dari Supabase berdasarkan nama."""
+    if not supabase_client or not nama_siswa.strip():
+        return None
+    try:
+        res = supabase_client.table("student_intelligence_profiles") \
+            .select("profile_data") \
+            .ilike("nama_siswa", f"%{nama_siswa.strip()}%") \
+            .execute()
+        if res.data and len(res.data) > 0:
+            return res.data[0].get("profile_data")
+        return None
+    except Exception as e:
+        print(f"LOG ERROR Get Student Profile: {e}")
+        return None
+        
+# ============================================================
 # ROBO MANTAP SYSTEM PROMPT
 # ============================================================
 
@@ -181,6 +230,10 @@ ATURAN SEBUTAN & HUKUM KOMUNIKASI
    - Jika Ustadzah menyinggung, menanyakan, atau meminta "LKPD":
    - Arahkan dengan santun dan takzim ke Dashboard *GuruMANTAP* dengan link: https://robomantap-intelligence.streamlit.app/
    - Informasikan bahwa tautan resmi dashboard dapat diakses langsung melalui **deskripsi profil WhatsApp RoboMANTAP**.
+
+4. PENANGANAN PERTANYAAN SENSITIF DARI PENGGUNA
+   - Jika pengguna bertanya atau menyinggung mengenai U.Project Nexus atau UPN atau U.P.N, langsung saja anda berikan link website resmi U.Project Nexus agar mereka bisa mengunjungi dan melihat secara detail mengenai Pengembang U.project Nexus.
+   - Berikan Link Website U.Project Nexus berikut: https://official.uproject-nexus.workers.dev/
 
 ============================================================
 SAPAAN PERTAMA
@@ -660,6 +713,28 @@ def process_message_background(
 ):
     try:
         mark_message_as_read(message_id)
+        # Deteksi Pesan Perkenalan Otomatis dari Dashboard Web
+        if user_text and "halo robomantap! saya" in user_text.lower():
+            try:
+                name_match = re.search(r"saya\s+([^(,.]+)", user_text, re.IGNORECASE)
+                if name_match:
+                    nama_siswa = name_match.group(1).strip()
+                    profile = get_student_profile_data(nama_siswa)
+                    
+                    if profile:
+                        avg = profile.get("average_score", 0)
+                        weakest = profile.get("weakest_subject", "Mata Pelajaran Utama")
+                        welcome_reply = (
+                            f"Halo *{nama_siswa}*! 👋🌸\n\n"
+                            f"Data RoboMANTAP Intelligence mencatat rata-rata skormu saat ini *{avg:.0f}%*.\n"
+                            f"Area yang perlu diperkuat: *{weakest}*.\n\n"
+                            f"Ada materi yang ingin kamu tanyakan atau bahas bersama RoboMANTAP hari ini? 😊"
+                        )
+                        send_whatsapp_message(from_number, welcome_reply)
+                        save_audit_log(from_number, "text", user_text, welcome_reply)
+                        return
+            except Exception as e_m:
+                print(f"LOG ERROR Extract Name: {e_m}")
 
         media_bytes = None
         mime_type = None
@@ -712,6 +787,8 @@ def process_message_background(
             if media_up_id:
                 send_whatsapp_document(from_number, media_up_id, filename, caption="Berikut dokumen PDF-nya 📄✨")
 
+        # Pencatatan audit log otomatis ke Supabase
+        save_audit_log(from_number, "text" if not media_id else "media", user_text, ai_reply)
 
     except Exception as e:
         print(f"LOG ERROR in Background Worker: {e}")
