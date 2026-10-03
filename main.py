@@ -155,6 +155,9 @@ MAX_HISTORY_LENGTH = 12
 PROCESSED_MESSAGE_IDS = set()
 MAX_PROCESSED_IDS = 1000
 
+# Outbound automation boundary (additive; existing inbound/Gemini flow remains unchanged)
+AUTOMATION_SHARED_SECRET = os.getenv("AUTOMATION_SHARED_SECRET", "")
+
 # ============================================================
 # HELPER AUDIT & SUPABASE PROFILE LOOKUP
 # ============================================================
@@ -663,6 +666,7 @@ def send_whatsapp_message(
 
     MAX_MESSAGE_LENGTH = 8000
     chunks = []
+    last_provider_message_id = None
 
     while len(message_text) > MAX_MESSAGE_LENGTH:
         split_position = message_text.rfind("\n", 0, MAX_MESSAGE_LENGTH)
@@ -694,12 +698,36 @@ def send_whatsapp_message(
             )
 
             print(f"LOG Send WA -> Status Code: {res.status_code}")
+            if res.status_code == 200:
+                try:
+                    last_provider_message_id = (res.json().get("messages") or [{}])[0].get("id") or last_provider_message_id
+                except Exception:
+                    pass
 
             if res.status_code != 200:
                 print(f"LOG Meta API Error: {res.text}")
 
         except requests.RequestException as e:
             print(f"LOG ERROR Sending WhatsApp Message: {e}")
+
+    return last_provider_message_id
+
+
+def resolve_wa_number_for_person(person_id: str):
+    if not supabase_client or not person_id:
+        return None
+    try:
+        res = (supabase_client.table("wa_identities")
+               .select("wa_number,status")
+               .eq("person_id", str(person_id))
+               .eq("status", "ACTIVE")
+               .limit(1)
+               .execute())
+        if res.data:
+            return str(res.data[0].get("wa_number") or "").strip() or None
+    except Exception as e:
+        print(f"LOG ERROR Resolve WA Identity: {e}")
+    return None
 
 
 # ============================================================
@@ -803,6 +831,112 @@ async def root():
         "service": "RoboMANTAP WhatsApp AI",
         "provider": "U.Project Nexus"
     }
+
+
+# ============================================================
+# AUTOMATION OUTBOUND DELIVERY BOUNDARY
+# ============================================================
+@app.post("/automation/deliver")
+async def automation_deliver(request: Request):
+    """Authenticated outbound boundary.
+
+    A delivery row must already exist in automation_deliveries with PENDING
+    status. The database transition PENDING -> PROCESSING is the claim gate;
+    only the worker that successfully claims the row may call the provider.
+    This prevents concurrent duplicate WhatsApp sends.
+    """
+    if not AUTOMATION_SHARED_SECRET:
+        return Response(content='{"status":"disabled"}', media_type="application/json", status_code=503)
+    if request.headers.get("X-Automation-Secret", "") != AUTOMATION_SHARED_SECRET:
+        return Response(content='{"status":"forbidden"}', media_type="application/json", status_code=403)
+    try:
+        payload = await request.json()
+    except Exception:
+        return Response(content='{"status":"invalid_json"}', media_type="application/json", status_code=400)
+
+    person_id = str(payload.get("recipient_person_id") or "").strip()
+    message_text = str(payload.get("message_text") or "").strip()
+    idempotency_key = str(payload.get("idempotency_key") or "").strip()
+    if not person_id or not message_text or not idempotency_key:
+        return Response(content='{"status":"invalid_payload"}', media_type="application/json", status_code=422)
+
+    if not supabase_client:
+        return {"status": "rejected", "reason": "AUTOMATION_PERSISTENCE_UNAVAILABLE"}
+
+    # Atomic claim: only one caller can transition this delivery from PENDING
+    # to PROCESSING. A SENT row is an idempotent duplicate. Other states are
+    # not eligible for a second provider send from this endpoint.
+    try:
+        existing = (supabase_client.table("automation_deliveries")
+                    .select("status,provider_message_id,recipient_person_id")
+                    .eq("idempotency_key", idempotency_key)
+                    .limit(1).execute())
+        if not existing.data:
+            return {"status": "rejected", "reason": "DELIVERY_NOT_ENQUEUED"}
+
+        row = existing.data[0]
+        if str(row.get("recipient_person_id") or "") != person_id:
+            return {"status": "rejected", "reason": "RECIPIENT_MISMATCH"}
+        if row.get("status") == "SENT":
+            return {"status": "duplicate", "idempotency_key": idempotency_key,
+                    "provider_message_id": row.get("provider_message_id")}
+        if row.get("status") != "PENDING":
+            return {"status": "duplicate", "idempotency_key": idempotency_key,
+                    "reason": f"DELIVERY_STATUS_{row.get('status')}"}
+
+        claim = (supabase_client.table("automation_deliveries")
+                 .update({"status": "PROCESSING", "attempt_count": 1,
+                          "updated_at": datetime.utcnow().isoformat()})
+                 .eq("idempotency_key", idempotency_key)
+                 .eq("status", "PENDING")
+                 .execute())
+        if not claim.data:
+            return {"status": "duplicate", "idempotency_key": idempotency_key,
+                    "reason": "DELIVERY_CLAIM_LOST"}
+    except Exception as e:
+        print(f"LOG ERROR Automation Delivery Claim: {e}")
+        return {"status": "rejected", "reason": "AUTOMATION_CLAIM_FAILED"}
+
+    to_phone = resolve_wa_number_for_person(person_id)
+    if not to_phone:
+        try:
+            (supabase_client.table("automation_deliveries")
+             .update({"status": "FAILED", "last_error": "WA_IDENTITY_NOT_ACTIVE",
+                      "updated_at": datetime.utcnow().isoformat()})
+             .eq("idempotency_key", idempotency_key)
+             .eq("status", "PROCESSING").execute())
+        except Exception as e:
+            print(f"LOG Automation Failure Persistence Warning: {e}")
+        return {"status": "rejected", "reason": "WA_IDENTITY_NOT_ACTIVE"}
+
+    provider_message_id = send_whatsapp_message(to_phone, message_text)
+    if not provider_message_id:
+        try:
+            (supabase_client.table("automation_deliveries")
+             .update({"status": "FAILED", "last_error": "WA_PROVIDER_SEND_FAILED",
+                      "updated_at": datetime.utcnow().isoformat()})
+             .eq("idempotency_key", idempotency_key)
+             .eq("status", "PROCESSING").execute())
+        except Exception as e:
+            print(f"LOG Automation Failure Persistence Warning: {e}")
+        return {"status": "rejected", "reason": "WA_PROVIDER_SEND_FAILED"}
+
+    try:
+        (supabase_client.table("automation_deliveries")
+         .update({"status": "SENT", "provider_message_id": provider_message_id,
+                  "sent_at": datetime.utcnow().isoformat(),
+                  "updated_at": datetime.utcnow().isoformat()})
+         .eq("idempotency_key", idempotency_key)
+         .eq("status", "PROCESSING").execute())
+    except Exception as e:
+        print(f"LOG Automation Delivery Persistence Warning: {e}")
+        return {"status": "accepted", "idempotency_key": idempotency_key,
+                "provider_message_id": provider_message_id,
+                "persistence_warning": True}
+
+    save_audit_log(to_phone, "automation", idempotency_key, message_text)
+    return {"status": "accepted", "idempotency_key": idempotency_key,
+            "provider_message_id": provider_message_id}
 
 
 # ============================================================
