@@ -745,11 +745,27 @@ def process_message_background(
         # Deteksi Pesan Perkenalan Otomatis dari Dashboard Web
         if user_text and "halo robomantap! saya" in user_text.lower():
             try:
-                name_match = re.search(r"saya\s+([^(,.]+)", user_text, re.IGNORECASE)
+                # Menangkap nama dan jenjang dari teks: "Saya Nama Siswa (Jenjang),"
+                name_match = re.search(r"saya\s+([^(,]+)\s*\(([^)]+)\)", user_text, re.IGNORECASE)
                 if name_match:
                     nama_siswa = name_match.group(1).strip()
-                    profile = get_student_profile_data(nama_siswa)
+                    jenjang_siswa = name_match.group(2).strip()
                     
+                    # Membuat student_key persis seperti format di student_intelligence.py
+                    import re as regex
+                    student_key = f"{regex.sub(r'\\s+', ' ', nama_siswa).casefold()}|{regex.sub(r'\\s+', ' ', jenjang_siswa).casefold()}"
+                    
+                    # 1. SIMPAN/UPDATE NOMOR WA SISWA KE DATABASE (WA_IDENTITIES)
+                    if supabase_client:
+                        supabase_client.table("wa_identities").upsert({
+                            "person_id": student_key,
+                            "wa_number": from_number,
+                            "status": "ACTIVE"
+                        }).execute()
+                        print(f"LOG: Berhasil menautkan nomor WA {from_number} ke siswa {nama_siswa}")
+
+                    # 2. Ambil Profil & Kirim Balasan (Kode Anda yang sudah ada)
+                    profile = get_student_profile_data(nama_siswa)
                     if profile:
                         avg = profile.get("average_score", 0)
                         weakest = profile.get("weakest_subject", "Mata Pelajaran Utama")
@@ -763,7 +779,8 @@ def process_message_background(
                         save_audit_log(from_number, "text", user_text, welcome_reply)
                         return
             except Exception as e_m:
-                print(f"LOG ERROR Extract Name: {e_m}")
+                print(f"LOG ERROR Extract Name & Save Identity: {e_m}")
+
 
         media_bytes = None
         mime_type = None
