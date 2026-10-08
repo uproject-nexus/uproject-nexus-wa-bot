@@ -471,7 +471,27 @@ def generate_ai_response(
         print("LOG ERROR: Tidak ada Gemini API Key.")
         return "Maaf, sistem AI RoboMANTAP sedang belum terhubung. Silakan coba beberapa saat lagi."
 
+    # --- TAMBAHAN MEMORI ASISTEN PERSONAL ---
+    # Cek apakah nomor WA ini sudah terdaftar di database
+    user_context_injection = ""
+    if supabase_client:
+        try:
+            res = supabase_client.table("wa_identities").select("nama, role, metadata").eq("wa_number", user_id).limit(1).execute()
+            if res.data:
+                user_data = res.data[0]
+                nama_user = user_data.get("nama", "")
+                role_user = user_data.get("role", "SISWA")
+                
+                if role_user == "SISWA":
+                    kelas_user = user_data.get("metadata", {}).get("kelas", "")
+                    user_context_injection = f"\n\n[SISTEM INTERNAL: Pengguna yang sedang berbicara denganmu saat ini adalah seorang SANTRI bernama {nama_user} dari kelas {kelas_user}. Sapa dia dengan namanya dan puji semangat belajarnya di awal kalimat!]"
+                elif role_user == "GURU":
+                    user_context_injection = f"\n\n[SISTEM INTERNAL: Pengguna yang sedang berbicara denganmu saat ini adalah seorang GURU/USTADZAH bernama {nama_user}. Sapa beliau dengan hormat (Ustadzah {nama_user}) di awal kalimat!]"
+        except Exception as e:
+            print(f"Failed to fetch identity memory: {e}")
+
     # PERUBAHAN 1: Tambahkan kata "dokumen" pada pesan default
+    final_prompt = prompt_text
     if not prompt_text and not media_bytes:
         return "Silakan kirimkan pesan teks, Voice Note (VN), foto, atau dokumen (PDF/Word) yang ingin kamu bahas. 😊"
 
@@ -522,6 +542,7 @@ def generate_ai_response(
                 content_parts.append(media_part)
 
             # PERUBAHAN 2: Tambahkan logika jika yang dikirim adalah dokumen
+            final_prompt = final_prompt + user_context_injection
             if not prompt_text:
                 if mime_type and "audio" in mime_type:
                     final_prompt = "Tolong dengarkan pesan suara (Voice Note) ini dengan saksama, pahami maksudnya, lalu berikan jawaban, respons, atau penjelasan yang tepat sesuai isi suaranya."
@@ -742,45 +763,64 @@ def process_message_background(
 ):
     try:
         mark_message_as_read(message_id)
-        # Deteksi Pesan Perkenalan Otomatis dari Dashboard Web
+        # ---------------------------------------------------------
+        # DETEKSI REGISTRASI IDENTITAS (HANDSHAKE)
+        # ---------------------------------------------------------
         if user_text and "halo robomantap! saya" in user_text.lower():
             try:
-                # Menangkap nama dan jenjang dari teks: "Saya Nama Siswa (Jenjang),"
-                name_match = re.search(r"saya\s+([^(,]+)\s*\(([^)]+)\)", user_text, re.IGNORECASE)
-                if name_match:
-                    nama_siswa = name_match.group(1).strip()
-                    jenjang_siswa = name_match.group(2).strip()
-                    
-                    # Membuat student_key persis seperti format di student_intelligence.py
-                    import re as regex
-                    student_key = f"{regex.sub(r'\\s+', ' ', nama_siswa).casefold()}|{regex.sub(r'\\s+', ' ', jenjang_siswa).casefold()}"
-                    
-                    # 1. SIMPAN/UPDATE NOMOR WA SISWA KE DATABASE (WA_IDENTITIES)
-                    if supabase_client:
-                        supabase_client.table("wa_identities").upsert({
-                            "person_id": student_key,
-                            "wa_number": from_number,
-                            "status": "ACTIVE"
-                        }).execute()
-                        print(f"LOG: Berhasil menautkan nomor WA {from_number} ke siswa {nama_siswa}")
+                # 1. Mode Siswa
+                if "[siswa]" in user_text.lower():
+                    # Format: Halo RoboMANTAP! Saya [SISWA] : Nama - Jenjang - Kelas - Absen
+                    parts = user_text.split(":")[-1].split("-")
+                    if len(parts) >= 4:
+                        nama = parts[0].strip()
+                        jenjang = parts[1].strip()
+                        kelas = parts[2].strip()
+                        absen = parts[3].strip()
+                        
+                        student_key = f"{nama.casefold().replace(' ', '')}|{jenjang.casefold().replace(' ', '')}"
+                        
+                        # Simpan ke tabel identitas agar tidak amnesia
+                        if supabase_client:
+                            # Update wa_identities
+                            supabase_client.table("wa_identities").upsert({
+                                "wa_number": from_number,
+                                "person_id": student_key,
+                                "status": "ACTIVE",
+                                "role": "SISWA", # Tambahkan kolom role di tabel Anda jika perlu
+                                "nama": nama,
+                                "metadata": {"jenjang": jenjang, "kelas": kelas, "absen": absen}
+                            }).execute()
 
-                    # 2. Ambil Profil & Kirim Balasan (Kode Anda yang sudah ada)
-                    profile = get_student_profile_data(nama_siswa)
-                    if profile:
-                        avg = profile.get("average_score", 0)
-                        weakest = profile.get("weakest_subject", "Mata Pelajaran Utama")
-                        welcome_reply = (
-                            f"Halo *{nama_siswa}*! 👋🌸\n\n"
-                            f"Data RoboMANTAP Intelligence mencatat rata-rata skormu saat ini *{avg:.0f}%*.\n"
-                            f"Area yang perlu diperkuat: *{weakest}*.\n\n"
-                            f"Ada materi yang ingin kamu tanyakan atau bahas bersama RoboMANTAP hari ini? 😊"
-                        )
-                        send_whatsapp_message(from_number, welcome_reply)
-                        save_audit_log(from_number, "text", user_text, welcome_reply)
+                        reply = f"Halo Santri Hebat *{nama}* (Kelas {kelas})! 👋🌸\n\nNomor WA kamu sudah berhasil terhubung dengan sistem RoboMANTAP. Sekarang aku akan selalu mengingatmu!\n\nAda pelajaran yang ingin kita bahas hari ini?"
+                        send_whatsapp_message(from_number, reply)
+                        save_audit_log(from_number, "text", user_text, reply)
                         return
-            except Exception as e_m:
-                print(f"LOG ERROR Extract Name & Save Identity: {e_m}")
 
+                # 2. Mode Guru
+                elif "[guru]" in user_text.lower() and "validated" in user_text.lower():
+                    # Format: Halo RoboMANTAP! Saya [GURU] : Nama - VALIDATED
+                    parts = user_text.split(":")[-1].split("-")
+                    if len(parts) >= 2:
+                        nama = parts[0].strip()
+                        teacher_key = f"guru_{nama.casefold().replace(' ', '')}"
+                        
+                        if supabase_client:
+                            supabase_client.table("wa_identities").upsert({
+                                "wa_number": from_number,
+                                "person_id": teacher_key,
+                                "status": "ACTIVE",
+                                "role": "GURU",
+                                "nama": nama
+                            }).execute()
+
+                        reply = f"Assalamu’alaikum Ustadzah *{nama}*. 🙏✨\n\nAkses GuruMANTAP berhasil diverifikasi. Saya siap membantu Ustadzah menyusun materi, soal, dan memonitor perkembangan santri hari ini."
+                        send_whatsapp_message(from_number, reply)
+                        save_audit_log(from_number, "text", user_text, reply)
+                        return
+                        
+            except Exception as e_m:
+                print(f"LOG ERROR Extract Identity: {e_m}")
 
         media_bytes = None
         mime_type = None
