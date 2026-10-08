@@ -5,3 +5,4 @@ google-genai
 python-docx
 reportlab
 supabase
+pytz
