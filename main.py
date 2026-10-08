@@ -22,6 +22,7 @@ from docx.enum.table import WD_ALIGN_VERTICAL
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY, TA_LEFT
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from scheduler_tka import trigger_wa_bot_reminder
 
 # ============================================================
 # APP
@@ -832,7 +833,19 @@ async def root():
         "provider": "U.Project Nexus"
     }
 
-
+# ============================================================
+# run-scheduler
+# ============================================================
+@app.get("/api/run-scheduler")
+async def run_cron_scheduler():
+    try:
+        # Menjalankan pemindaian TKA
+        trigger_wa_bot_reminder()
+        return {"status": "success", "message": "Pemindaian TKA berhasil dijalankan"}
+    except Exception as e:
+        print(f"LOG ERROR Scheduler: {e}")
+        return {"status": "error", "message": str(e)}
+        
 # ============================================================
 # AUTOMATION OUTBOUND DELIVERY BOUNDARY
 # ============================================================
