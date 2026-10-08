@@ -57,36 +57,8 @@ if SUPABASE_URL and SUPABASE_KEY:
     except Exception as e:
         print(f"LOG ERROR Init Supabase: {e}")
 
-# ... (Kode pengecekan supabase_client yang sudah ada) ...
-
-is_registered = False
-if supabase_client:
-    try:
-        res = supabase_client.table("wa_identities").select("nama").eq("wa_number", user_id).limit(1).execute()
-        if res.data:
-            is_registered = True
-            # ... (lanjutkan ambil nama, kelas, dan buat user_context_injection seperti langkah sebelumnya)
-    except Exception:
-        pass
-
-# [POLESAN GATEKEEPER] Jika belum terdaftar dan BUKAN sedang mengirim pesan format registrasi [SISWA]/[GURU]
-if not is_registered and "[siswa]" not in prompt_text.lower() and "[guru]" not in prompt_text.lower():
-    pesan_tolak = (
-        "Mohon maaf, nomor WA ini belum terdaftar di sistem RoboMANTAP. 🧕🏼🚫\n\n"
-        "Agar aku bisa memanggil namamu dan mencatat perkembangan belajarmu, "
-        "harap lakukan sinkronisasi identitas terlebih dahulu melalui portal resmi kami:\n\n"
-        "🔗 *[https://robomantap-intelligence.streamlit.app]*\n\n"
-        "Pilih menu 'Saya Siswa' atau 'Saya Guru', lengkapi data, lalu klik tombol kirim pesan!"
-    )
-    return pesan_tolak # Bot langsung memutus percakapan AI dan mengirim pesan ini
-
 # ============================================================
 # GEMINI API KEY ROTATION
-# Compatible dengan RoboMANTAP app utama / ai_engine.py
-# Prioritas:
-#   1. GEMINI_API_KEYS
-#   2. GEMINI_KEYS (legacy WA Bot)
-#   3. GEMINI_API_KEY
 # ============================================================
 GEMINI_KEYS_RAW = (
     os.getenv("GEMINI_API_KEYS")
@@ -172,29 +144,12 @@ MODELS = (
 # ============================================================
 # IN-MEMORY CHAT HISTORY & MESSAGE DEDUPLICATION
 # ============================================================
-
 CHAT_HISTORIES = {}
 MAX_HISTORY_LENGTH = 12
-
-# Mencegah eksekusi ganda jika Meta melakukan retry
 PROCESSED_MESSAGE_IDS = set()
 MAX_PROCESSED_IDS = 1000
-
-# Outbound automation boundary (additive; existing inbound/Gemini flow remains unchanged)
 AUTOMATION_SHARED_SECRET = os.getenv("AUTOMATION_SHARED_SECRET", "")
 
-# Ambil waktu WIB
-tz_wib = pytz.timezone('Asia/Jakarta')
-waktu_sekarang = datetime.now(tz_wib)
-jam = waktu_sekarang.hour
-
-if 4 <= jam < 11: sapaan_waktu = "Pagi"
-elif 11 <= jam < 15: sapaan_waktu = "Siang"
-elif 15 <= jam < 18: sapaan_waktu = "Sore"
-else: sapaan_waktu = "Malam"
-
-# Masukkan ke dalam injeksi yang sudah kita buat sebelumnya
-user_context_injection = f"\n\n[SISTEM INTERNAL: Saat ini adalah {sapaan_waktu} hari. Pengguna ini adalah SANTRI bernama {nama_user} dari kelas {kelas_user}. Gunakan sapaan {sapaan_waktu} yang ramah!]"
 # ============================================================
 # HELPER AUDIT & SUPABASE PROFILE LOOKUP
 # ============================================================
@@ -492,7 +447,7 @@ def format_text_for_whatsapp(text: str) -> str:
     return text.strip()
 
 # ============================================================
-# GEMINI RESPONSE WITH HISTORY & THINKING CONFIG
+# GEMINI RESPONSE WITH HISTORY, MEMORY & GATEKEEPER
 # ============================================================
 def generate_ai_response(
     user_id: str, 
@@ -506,104 +461,105 @@ def generate_ai_response(
         print("LOG ERROR: Tidak ada Gemini API Key.")
         return "Maaf, sistem AI RoboMANTAP sedang belum terhubung. Silakan coba beberapa saat lagi."
 
-    # --- TAMBAHAN MEMORI ASISTEN PERSONAL ---
-    # Cek apakah nomor WA ini sudah terdaftar di database
+    # 1. --- TARIK IDENTITAS DARI DATABASE ---
+    is_registered = False
     user_context_injection = ""
+    nama_user = ""
+    kelas_user = ""
+    role_user = "SISWA"
+
     if supabase_client:
         try:
             res = supabase_client.table("wa_identities").select("nama, role, metadata").eq("wa_number", user_id).limit(1).execute()
             if res.data:
+                is_registered = True
                 user_data = res.data[0]
                 nama_user = user_data.get("nama", "")
                 role_user = user_data.get("role", "SISWA")
-                
                 if role_user == "SISWA":
                     kelas_user = user_data.get("metadata", {}).get("kelas", "")
-                    user_context_injection = f"\n\n[SISTEM INTERNAL: Pengguna yang sedang berbicara denganmu saat ini adalah seorang SANTRI bernama {nama_user} dari kelas {kelas_user}. Sapa dia dengan namanya dan puji semangat belajarnya di awal kalimat!]"
-                elif role_user == "GURU":
-                    user_context_injection = f"\n\n[SISTEM INTERNAL: Pengguna yang sedang berbicara denganmu saat ini adalah seorang GURU/USTADZAH bernama {nama_user}. Sapa beliau dengan hormat (Ustadzah {nama_user}) di awal kalimat!]"
         except Exception as e:
             print(f"Failed to fetch identity memory: {e}")
 
-    # PERUBAHAN 1: Tambahkan kata "dokumen" pada pesan default
+    # 2. --- GATEKEEPER (PENOLAKAN NOMOR ASING) ---
+    safe_prompt_text = (prompt_text or "").lower()
+    
+    if not is_registered and "[siswa]" not in safe_prompt_text and "[guru]" not in safe_prompt_text:
+        pesan_tolak = (
+            "Mohon maaf, nomor WA ini belum terdaftar di sistem RoboMANTAP. 🧕🏼🚫\n\n"
+            "Agar aku bisa memanggil namamu dan mencatat perkembangan belajarmu, "
+            "harap lakukan sinkronisasi identitas terlebih dahulu melalui portal resmi kami:\n\n"
+            "🔗 *https://robomantap-intelligence.streamlit.app/*\n\n"
+            "Pilih menu 'Saya Siswa' atau 'Saya Guru', lengkapi data, lalu klik tombol kirim pesan!"
+        )
+        return pesan_tolak
+
+    # 3. --- INJEKSI WAKTU & MEMORI PERSONAL ---
+    if is_registered:
+        tz_wib = pytz.timezone('Asia/Jakarta')
+        waktu_sekarang = datetime.now(tz_wib)
+        jam = waktu_sekarang.hour
+
+        if 4 <= jam < 11: sapaan_waktu = "Pagi"
+        elif 11 <= jam < 15: sapaan_waktu = "Siang"
+        elif 15 <= jam < 18: sapaan_waktu = "Sore"
+        else: sapaan_waktu = "Malam"
+
+        if role_user == "SISWA":
+            user_context_injection = f"\n\n[SISTEM INTERNAL: Saat ini adalah {sapaan_waktu} hari. Pengguna ini adalah SANTRI bernama {nama_user} dari kelas {kelas_user}. Sapa dia dengan namanya dan puji semangat belajarnya di awal kalimat dengan sapaan {sapaan_waktu} yang ramah!]"
+        elif role_user == "GURU":
+            user_context_injection = f"\n\n[SISTEM INTERNAL: Saat ini adalah {sapaan_waktu} hari. Pengguna ini adalah GURU/USTADZAH bernama {nama_user}. Sapa beliau dengan hormat (Ustadzah {nama_user}) di awal kalimat dengan sapaan {sapaan_waktu}!]"
+
+    # 4. --- PENYUSUNAN PROMPT FINAL ---
     final_prompt = prompt_text
+    
     if not prompt_text and not media_bytes:
         return "Silakan kirimkan pesan teks, Voice Note (VN), foto, atau dokumen (PDF/Word) yang ingin kamu bahas. 😊"
 
+    final_prompt = (final_prompt or "") + user_context_injection
+
     user_history = CHAT_HISTORIES.get(user_id, [])
-
-    combinations = [
-        (key, model)
-        for key in keys
-        for model in MODELS
-    ]
-
+    combinations = [(key, model) for key in keys for model in MODELS]
     random.shuffle(combinations)
     last_error = None
 
     for selected_key, selected_model in combinations:
         try:
-            print(
-                f"LOG Gemini Attempt -> "
-                f"User: {user_id} | "
-                f"Model: {selected_model} | "
-                f"Has Media: {bool(media_bytes)} | "
-                f"Key: {_gemini_key_fingerprint(selected_key)}"
-            )
-
             client = genai.Client(api_key=selected_key)
             config = _stream_config(selected_model)
 
             formatted_history = []
             for item in user_history:
                 formatted_history.append(
-                    types.Content(
-                        role=item["role"],
-                        parts=[types.Part.from_text(text=p) for p in item["parts"]]
-                    )
+                    types.Content(role=item["role"], parts=[types.Part.from_text(text=p) for p in item["parts"]])
                 )
 
-            chat = client.chats.create(
-                model=selected_model,
-                config=config,
-                history=formatted_history
-            )
+            chat = client.chats.create(model=selected_model, config=config, history=formatted_history)
 
-            # SUSUN PESAN MASUK (TEKS + MEDIA FOTO/VN JIKA ADA)
             content_parts = []
-
             if media_bytes and mime_type:
                 media_part = types.Part.from_bytes(data=media_bytes, mime_type=mime_type)
                 content_parts.append(media_part)
 
-            # PERUBAHAN 2: Tambahkan logika jika yang dikirim adalah dokumen
-            final_prompt = final_prompt + user_context_injection
             if not prompt_text:
                 if mime_type and "audio" in mime_type:
-                    final_prompt = "Tolong dengarkan pesan suara (Voice Note) ini dengan saksama, pahami maksudnya, lalu berikan jawaban, respons, atau penjelasan yang tepat sesuai isi suaranya."
+                    document_prompt = "Tolong dengarkan pesan suara (Voice Note) ini dengan saksama, pahami maksudnya, lalu berikan jawaban, respons, atau penjelasan yang tepat sesuai isi suaranya."
                 elif mime_type and ("pdf" in mime_type or "document" in mime_type or "msword" in mime_type):
-                    final_prompt = "Tolong baca dan analisis isi dokumen ini dengan teliti. Jelaskan poin-poin pentingnya, atau jika ini berisi materi/soal, tolong selesaikan dan berikan pembahasannya secara terstruktur."
+                    document_prompt = "Tolong baca dan analisis isi dokumen ini dengan teliti. Jelaskan poin-poin pentingnya, atau jika ini berisi materi/soal, tolong selesaikan dan berikan pembahasannya secara terstruktur."
                 else:
-                    final_prompt = "Tolong bantu baca, jelaskan, dan selesaikan materi atau soal yang ada pada gambar ini secara terstruktur dan jelas."
+                    document_prompt = "Tolong bantu baca, jelaskan, dan selesaikan materi atau soal yang ada pada gambar ini secara terstruktur dan jelas."
+                document_prompt += user_context_injection
+                content_parts.append(document_prompt)
             else:
-                final_prompt = prompt_text
-                
-            content_parts.append(final_prompt)
+                content_parts.append(final_prompt)
 
-            # Kirim request ke Gemini
             response = chat.send_message(content_parts)
-
-            if not response:
-                raise RuntimeError("Gemini returned empty response.")
-
             text = getattr(response, "text", None)
 
-            if not text or not text.strip():
-                raise RuntimeError("Gemini response text kosong.")
+            if not text or not text.strip(): raise RuntimeError("Gemini response text kosong.")
 
             cleaned_text = format_text_for_whatsapp(text)
 
-            # Update History
             updated_history = []
             for msg in chat.get_history():
                 parts_text = []
@@ -612,10 +568,7 @@ def generate_ai_response(
                         if hasattr(p, "text") and p.text:
                             parts_text.append(p.text)
                 if parts_text:
-                    updated_history.append({
-                        "role": msg.role,
-                        "parts": parts_text
-                    })
+                    updated_history.append({"role": msg.role, "parts": parts_text})
 
             if len(updated_history) > MAX_HISTORY_LENGTH:
                 updated_history = updated_history[-MAX_HISTORY_LENGTH:]
@@ -626,17 +579,13 @@ def generate_ai_response(
 
         except Exception as e:
             last_error = e
-            print(f"LOG Gemini FAILED -> Model: {selected_model} | Error: {e}")
             continue
 
-    print(f"LOG Gemini ALL ATTEMPTS FAILED: {last_error}")
     return "Mohon maaf 🙏\n\nRoboMANTAP sedang mengalami gangguan sementara pada layanan AI."
-
 
 # ============================================================
 # WHATSAPP UTILITIES & MESSAGE SENDER
 # ============================================================
-
 def mark_message_as_read(message_id: str):
     """Mengubah centang pesan masuk menjadi CENTANG BIRU secara instan."""
     if not WHATSAPP_TOKEN or not PHONE_NUMBER_ID or not message_id:
@@ -657,7 +606,6 @@ def mark_message_as_read(message_id: str):
         requests.post(url, json=payload, headers=headers, timeout=5)
     except Exception as e:
         print(f"LOG ERROR Mark as Read: {e}")
-
 
 def download_whatsapp_media(media_id: str) -> tuple[bytes, str]:
     """
@@ -693,7 +641,6 @@ def download_whatsapp_media(media_id: str) -> tuple[bytes, str]:
         print(f"LOG ERROR in download_whatsapp_media: {e}")
         return None, None
         
-
 def send_whatsapp_message(
     to_phone: str,
     message_text: str
@@ -797,6 +744,7 @@ def process_message_background(
 ):
     try:
         mark_message_as_read(message_id)
+        
         # ---------------------------------------------------------
         # DETEKSI REGISTRASI IDENTITAS (HANDSHAKE)
         # ---------------------------------------------------------
@@ -805,11 +753,9 @@ def process_message_background(
                 # 1. Mode Siswa
                 if "[siswa]" in user_text.lower():
                     try:
-                        # Hapus awalan "[SISWA] :"
                         data_mentah = user_text.split(":")[-1]
                         parts = data_mentah.split("-")
                         if len(parts) < 4:
-                            # Jika hasil pecahan kurang dari 4, berarti siswa menghapus tanda strip (-)
                             raise ValueError("Format rusak")
                             
                         nama = parts[0].strip()
@@ -819,14 +765,12 @@ def process_message_background(
                             
                         student_key = f"{nama.casefold().replace(' ', '')}|{jenjang.casefold().replace(' ', '')}"
                         
-                        # Simpan ke tabel identitas agar tidak amnesia
                         if supabase_client:
-                            # Update wa_identities
                             supabase_client.table("wa_identities").upsert({
                                 "wa_number": from_number,
                                 "person_id": student_key,
                                 "status": "ACTIVE",
-                                "role": "SISWA", # Tambahkan kolom role di tabel Anda jika perlu
+                                "role": "SISWA",
                                 "nama": nama,
                                 "metadata": {"jenjang": jenjang, "kelas": kelas, "absen": absen}
                             }).execute()
@@ -834,6 +778,7 @@ def process_message_background(
                         reply = f"Halo Santri Hebat *{nama}* (Kelas {kelas})! 👋🌸\n\nNomor WA kamu sudah berhasil terhubung dengan sistem RoboMANTAP. Sekarang aku akan selalu mengingatmu!\n\nAda pelajaran yang ingin kita bahas hari ini?"
                         send_whatsapp_message(from_number, reply)
                         save_audit_log(from_number, "text", user_text, reply)
+                        return
                         
                     except Exception:
                         reply = "Ups! ❌ Format registrasinya sepertinya tidak sengaja terubah. Tolong jangan ubah teks otomatisnya ya. Silakan kembali ke website dan klik tombolnya lagi."
@@ -842,7 +787,6 @@ def process_message_background(
 
                 # 2. Mode Guru
                 elif "[guru]" in user_text.lower() and "validated" in user_text.lower():
-                    # Format: Halo RoboMANTAP! Saya [GURU] : Nama - VALIDATED
                     parts = user_text.split(":")[-1].split("-")
                     if len(parts) >= 2:
                         nama = parts[0].strip()
@@ -878,50 +822,29 @@ def process_message_background(
             mime_type=mime_type
         )
 
-        # 1. Kirim balasan teks utama di WhatsApp
         send_whatsapp_message(from_number, ai_reply)
 
-        # Gabungkan teks user dan balasan AI untuk mendeteksi perintah dokumen (sangat berguna untuk Voice Note)
         text_lower = (user_text + " " + ai_reply).lower()
-        
-        # Kata kunci pemicu dokumen Word (.docx) (Ditambah kata kunci umum sebagai default)
-        word_triggers = [
-            "word", "docx", "doc", "ms word", "microsoft word", 
-            "file word", "dokumen word", "format dokumen", 
-            "bentuk dokumen", "file dokumen", "diunduh dokumen"
-        ]
-        
-        # Kata kunci pemicu dokumen PDF (.pdf)
+        word_triggers = ["word", "docx", "doc", "ms word", "microsoft word", "file word", "dokumen word", "format dokumen", "bentuk dokumen", "file dokumen", "diunduh dokumen"]
         pdf_triggers = ["pdf", "file pdf", "dokumen pdf"]
         
         if any(trigger in text_lower for trigger in word_triggers):
             file_bytes = create_word_docx(ai_reply)
             filename = "Dokumen_RoboMANTAP.docx"
-            media_up_id = upload_media_to_whatsapp(
-                file_bytes, 
-                "application/vnd.openxmlformats-officedocument.wordprocessingml.document", 
-                filename
-            )
-            if media_up_id:
-                send_whatsapp_document(from_number, media_up_id, filename, caption="Berikut dokumen Word-nya 📄✨")
+            media_up_id = upload_media_to_whatsapp(file_bytes, "application/vnd.openxmlformats-officedocument.wordprocessingml.document", filename)
+            if media_up_id: send_whatsapp_document(from_number, media_up_id, filename, caption="Berikut dokumen Word-nya 📄✨")
         
         elif any(trigger in text_lower for trigger in pdf_triggers):
             file_bytes = create_pdf_doc(ai_reply)
             filename = "Dokumen_RoboMANTAP.pdf"
-            media_up_id = upload_media_to_whatsapp(
-                file_bytes, 
-                "application/pdf", 
-                filename
-            )
-            if media_up_id:
-                send_whatsapp_document(from_number, media_up_id, filename, caption="Berikut dokumen PDF-nya 📄✨")
+            media_up_id = upload_media_to_whatsapp(file_bytes, "application/pdf", filename)
+            if media_up_id: send_whatsapp_document(from_number, media_up_id, filename, caption="Berikut dokumen PDF-nya 📄✨")
 
-        # Pencatatan audit log otomatis ke Supabase
         save_audit_log(from_number, "text" if not media_id else "media", user_text, ai_reply)
 
     except Exception as e:
         print(f"LOG ERROR in Background Worker: {e}")
-
+    
 # ============================================================
 # ROOT ENDPOINT
 # ============================================================
