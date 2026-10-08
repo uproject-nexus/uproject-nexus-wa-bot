@@ -33,7 +33,6 @@ app = FastAPI(
     description="WhatsApp AI Assistant for RoboMANTAP",
     version="1.4.0"
 )
-
 # ============================================================
 # ENVIRONMENT CONFIGURATION
 # ============================================================
