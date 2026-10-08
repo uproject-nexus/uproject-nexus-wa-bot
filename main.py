@@ -4,6 +4,7 @@ import io
 import random
 import requests
 import html
+import pytz
 from supabase import create_client, Client
 from fastapi import FastAPI, Request, Response, BackgroundTasks
 from google import genai
@@ -182,6 +183,18 @@ MAX_PROCESSED_IDS = 1000
 # Outbound automation boundary (additive; existing inbound/Gemini flow remains unchanged)
 AUTOMATION_SHARED_SECRET = os.getenv("AUTOMATION_SHARED_SECRET", "")
 
+# Ambil waktu WIB
+tz_wib = pytz.timezone('Asia/Jakarta')
+waktu_sekarang = datetime.now(tz_wib)
+jam = waktu_sekarang.hour
+
+if 4 <= jam < 11: sapaan_waktu = "Pagi"
+elif 11 <= jam < 15: sapaan_waktu = "Siang"
+elif 15 <= jam < 18: sapaan_waktu = "Sore"
+else: sapaan_waktu = "Malam"
+
+# Masukkan ke dalam injeksi yang sudah kita buat sebelumnya
+user_context_injection = f"\n\n[SISTEM INTERNAL: Saat ini adalah {sapaan_waktu} hari. Pengguna ini adalah SANTRI bernama {nama_user} dari kelas {kelas_user}. Gunakan sapaan {sapaan_waktu} yang ramah!]"
 # ============================================================
 # HELPER AUDIT & SUPABASE PROFILE LOOKUP
 # ============================================================
@@ -791,14 +804,19 @@ def process_message_background(
             try:
                 # 1. Mode Siswa
                 if "[siswa]" in user_text.lower():
-                    # Format: Halo RoboMANTAP! Saya [SISWA] : Nama - Jenjang - Kelas - Absen
-                    parts = user_text.split(":")[-1].split("-")
-                    if len(parts) >= 4:
+                    try:
+                        # Hapus awalan "[SISWA] :"
+                        data_mentah = user_text.split(":")[-1]
+                        parts = data_mentah.split("-")
+                        if len(parts) < 4:
+                            # Jika hasil pecahan kurang dari 4, berarti siswa menghapus tanda strip (-)
+                            raise ValueError("Format rusak")
+                            
                         nama = parts[0].strip()
                         jenjang = parts[1].strip()
                         kelas = parts[2].strip()
                         absen = parts[3].strip()
-                        
+                            
                         student_key = f"{nama.casefold().replace(' ', '')}|{jenjang.casefold().replace(' ', '')}"
                         
                         # Simpan ke tabel identitas agar tidak amnesia
@@ -812,11 +830,15 @@ def process_message_background(
                                 "nama": nama,
                                 "metadata": {"jenjang": jenjang, "kelas": kelas, "absen": absen}
                             }).execute()
-
+    
                         reply = f"Halo Santri Hebat *{nama}* (Kelas {kelas})! 👋🌸\n\nNomor WA kamu sudah berhasil terhubung dengan sistem RoboMANTAP. Sekarang aku akan selalu mengingatmu!\n\nAda pelajaran yang ingin kita bahas hari ini?"
                         send_whatsapp_message(from_number, reply)
                         save_audit_log(from_number, "text", user_text, reply)
-                        return
+                        
+                    except Exception:
+                        reply = "Ups! ❌ Format registrasinya sepertinya tidak sengaja terubah. Tolong jangan ubah teks otomatisnya ya. Silakan kembali ke website dan klik tombolnya lagi."
+                        send_whatsapp_message(from_number, reply)
+                        return                      
 
                 # 2. Mode Guru
                 elif "[guru]" in user_text.lower() and "validated" in user_text.lower():
