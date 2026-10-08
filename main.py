@@ -56,6 +56,29 @@ if SUPABASE_URL and SUPABASE_KEY:
     except Exception as e:
         print(f"LOG ERROR Init Supabase: {e}")
 
+# ... (Kode pengecekan supabase_client yang sudah ada) ...
+
+is_registered = False
+if supabase_client:
+    try:
+        res = supabase_client.table("wa_identities").select("nama").eq("wa_number", user_id).limit(1).execute()
+        if res.data:
+            is_registered = True
+            # ... (lanjutkan ambil nama, kelas, dan buat user_context_injection seperti langkah sebelumnya)
+    except Exception:
+        pass
+
+# [POLESAN GATEKEEPER] Jika belum terdaftar dan BUKAN sedang mengirim pesan format registrasi [SISWA]/[GURU]
+if not is_registered and "[siswa]" not in prompt_text.lower() and "[guru]" not in prompt_text.lower():
+    pesan_tolak = (
+        "Mohon maaf, nomor WA ini belum terdaftar di sistem RoboMANTAP. 🧕🏼🚫\n\n"
+        "Agar aku bisa memanggil namamu dan mencatat perkembangan belajarmu, "
+        "harap lakukan sinkronisasi identitas terlebih dahulu melalui portal resmi kami:\n\n"
+        "🔗 *[https://robomantap-intelligence.streamlit.app]*\n\n"
+        "Pilih menu 'Saya Siswa' atau 'Saya Guru', lengkapi data, lalu klik tombol kirim pesan!"
+    )
+    return pesan_tolak # Bot langsung memutus percakapan AI dan mengirim pesan ini
+
 # ============================================================
 # GEMINI API KEY ROTATION
 # Compatible dengan RoboMANTAP app utama / ai_engine.py
@@ -198,7 +221,6 @@ def get_student_profile_data(nama_siswa: str) -> dict | None:
 # ============================================================
 # ROBO MANTAP SYSTEM PROMPT
 # ============================================================
-
 SYSTEM_INSTRUCTION = """
 IDENTITAS & PERAN UTAMA
 
@@ -751,7 +773,6 @@ def resolve_wa_number_for_person(person_id: str):
         print(f"LOG ERROR Resolve WA Identity: {e}")
     return None
 
-
 # ============================================================
 # ASYNC BACKGROUND WORKER
 # ============================================================
@@ -1026,7 +1047,6 @@ async def verify_webhook(request: Request):
 
     print("LOG Webhook verification FAILED")
     return Response(content="Verification failed", status_code=403)
-
 
 # ============================================================
 # WHATSAPP INCOMING WEBHOOK (ASYNC BACKGROUND TASK)
