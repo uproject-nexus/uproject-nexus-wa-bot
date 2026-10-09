@@ -871,7 +871,7 @@ async def run_cron_scheduler():
 # ============================================================
 # morning-alert
 # ============================================================
-@app.post("/api/morning-alert")
+@app.get("/api/morning-alert")
 async def trigger_morning_alert(request: Request):
     global last_morning_alert_date
     
