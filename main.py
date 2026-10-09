@@ -23,7 +23,6 @@ from docx.enum.table import WD_ALIGN_VERTICAL
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY, TA_LEFT
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from scheduler_tka import trigger_wa_bot_reminder
 
 from routers.morning_alerts import router as morning_router
 from routers.night_alerts import router as night_router
@@ -35,11 +34,14 @@ from routers.scheduler_tka import router as tka_router
 app = FastAPI(
     title="RoboMANTAP WhatsApp AI",
     description="WhatsApp AI Assistant for RoboMANTAP",
-    version="1.4.0",
-    app.include_router(morning_router),
-    app.include_router(night_router),
-    app.include_router(tka_router)
+    version="1.7.0"
 )
+
+# REGISTRASI ROUTER 
+app.include_router(morning_router)
+app.include_router(night_router)
+app.include_router(tka_router)
+
 # ============================================================
 # ENVIRONMENT CONFIGURATION
 # ============================================================
