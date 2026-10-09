@@ -890,7 +890,7 @@ async def trigger_morning_alert(request: Request):
 
     try:
         # Ambil semua pengguna aktif dari tabel wa_identities
-        res = supabase.table("wa_identities").select("wa_number, nama, role").eq("status", "ACTIVE").execute()
+        res = supabase_client.table("wa_identities").select("wa_number, nama, role").eq("status", "ACTIVE").execute()
         
         if not res.data:
             return {"status": "success", "sent_count": 0, "message": "Tidak ada pengguna aktif."}
