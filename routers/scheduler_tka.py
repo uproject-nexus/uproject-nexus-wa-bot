@@ -9,7 +9,7 @@ from fastapi import APIRouter
 
 router = APIRouter(prefix="/api", tags=["Scheduler TKA"])
 
-@app.get("/run-scheduler")
+@router.get("/run-scheduler")
 async def run_cron_scheduler():
     try:
         trigger_wa_bot_reminder()
