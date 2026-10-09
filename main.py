@@ -957,14 +957,12 @@ async def trigger_morning_alert(request: Request):
       # 2. PERUBAHAN: Sisipkan log pengiriman ke automation_deliveries di sini
       try:
         delivery_payload = {
+            "recipient_person_id": user.get("person_id"),
             "status": "SENT",
             "channel": "WHATSAPP",
             "idempotency_key": f"morning_alert_{to_phone}_{today_date_str}",
             "message_text": pesan
         }
-        person_id = user.get("person_id")
-        if person_id:
-          delivery_payload["recipient_person_id"] = person_id
 
         supabase_client.table("automation_deliveries").insert(
             delivery_payload
