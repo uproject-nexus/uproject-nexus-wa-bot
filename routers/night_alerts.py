@@ -1,10 +1,10 @@
 from datetime import datetime
 from fastapi import APIRouter, Request
 import pytz
+import uuid
 
 router = APIRouter(prefix="/api", tags=["Night Alert"])
 last_night_alert_date = None
-
 
 @router.get("/night-alert")
 async def trigger_night_alert(request: Request):
@@ -78,6 +78,7 @@ async def trigger_night_alert(request: Request):
 
       try:
         delivery_payload = {
+            "delivery_id": str(uuid.uuid4()),
             "recipient_person_id": user.get("person_id"),
             "status": "SENT",
             "channel": "WHATSAPP",
