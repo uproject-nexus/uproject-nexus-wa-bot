@@ -1,6 +1,7 @@
 from datetime import datetime
 from fastapi import APIRouter, Request
 import pytz
+import uuid
 
 router = APIRouter(prefix="/api", tags=["Morning Alert"])
 last_morning_alert_date = None
@@ -90,6 +91,7 @@ async def trigger_morning_alert(request: Request):
       # 2. PERUBAHAN: Sisipkan log pengiriman ke automation_deliveries di sini
       try:
         delivery_payload = {
+            "delivery_id": str(uuid.uuid4()),
             "recipient_person_id": user.get("person_id"),
             "status": "SENT",
             "channel": "WHATSAPP",
