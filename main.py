@@ -33,7 +33,8 @@ from wa_prompts import (
     UNREGISTERED_GATEKEEPER_MSG,
     get_student_handshake_success_msg,
     get_teacher_handshake_success_msg,
-    HANDSHAKE_FORMAT_ERROR_MSG
+    HANDSHAKE_FORMAT_ERROR_MSG,
+    build_uts_schedule_prompt_context
 )
 
 # ============================================================
