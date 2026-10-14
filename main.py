@@ -1154,3 +1154,30 @@ def send_whatsapp_document(to_phone: str, media_id: str, filename: str, caption:
             print(f"LOG Meta API Error Document: {res.text}")
     except Exception as e:
         print(f"LOG ERROR send_whatsapp_document: {e}")
+
+# =================================================================================
+# PEMANGGILAN DATA UTS
+# =================================================================================
+def get_uts_schedule_context(kelas: str, jenjang: str) -> str:
+    """Mengambil data mentah jadwal UTS dari Supabase dan memformatnya via wa_prompts.py."""
+    if not supabase_client or not kelas:
+        return ""
+    try:
+        tz_wib = pytz.timezone('Asia/Jakarta')
+        today_str = datetime.now(tz_wib).strftime("%Y-%m-%d")
+
+        res = (
+            supabase_client.table("uts_schedules")
+            .select("*")
+            .eq("kelas", str(kelas))
+            .eq("jenjang", str(jenjang).upper())
+            .order("tanggal_ujian", desc=False)
+            .execute()
+        )
+
+        rows = res.data if res and res.data else []
+        return build_uts_schedule_prompt_context(kelas, jenjang, rows, today_str)
+
+    except Exception as e:
+        print(f"LOG ERROR get_uts_schedule_context: {e}")
+        return ""
