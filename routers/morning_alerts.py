@@ -4,6 +4,13 @@ import pytz
 import uuid
 import random
 
+from wa_prompts import (
+    get_morning_alert_student_msg,
+    get_morning_alert_student_fallback_msg,
+    get_morning_alert_sunday_student_msg,
+    get_morning_alert_teacher_msg
+)
+
 router = APIRouter(prefix="/api", tags=["Morning Alert UTS AI"])
 last_morning_alert_date = None
 
