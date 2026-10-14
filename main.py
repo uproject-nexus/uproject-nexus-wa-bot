@@ -28,6 +28,14 @@ from routers.morning_alerts import router as morning_router
 from routers.night_alerts import router as night_router
 from routers.scheduler_tka import router as tka_router
 
+from wa_prompts import (
+    SYSTEM_INSTRUCTION,
+    UNREGISTERED_GATEKEEPER_MSG,
+    get_student_handshake_success_msg,
+    get_teacher_handshake_success_msg,
+    HANDSHAKE_FORMAT_ERROR_MSG
+)
+
 # ============================================================
 # APP
 # ============================================================
