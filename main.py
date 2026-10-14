@@ -44,7 +44,6 @@ app = FastAPI(
     description="WhatsApp AI Assistant for RoboMANTAP",
     version="1.7.0"
 )
-
 # REGISTRASI ROUTER 
 app.include_router(morning_router)
 app.include_router(night_router)
