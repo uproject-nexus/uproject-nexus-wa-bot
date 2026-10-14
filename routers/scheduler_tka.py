@@ -7,6 +7,11 @@ from datetime import datetime, timedelta, timezone
 from supabase import create_client, Client
 from fastapi import APIRouter
 
+from wa_prompts import get_tka_reminder_msg
+
+# Di fungsi trigger_wa_bot_reminder():
+pesan = get_tka_reminder_msg(nama, mapel, waktu_habis)
+
 router = APIRouter(prefix="/api", tags=["Scheduler TKA"])
 
 @router.get("/run-scheduler")
