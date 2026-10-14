@@ -45,6 +45,7 @@ app = FastAPI(
     description="WhatsApp AI Assistant for RoboMANTAP",
     version="1.7.0"
 )
+
 # REGISTRASI ROUTER 
 app.include_router(morning_router)
 app.include_router(night_router)
@@ -129,24 +130,17 @@ print(
 
 
 def _gemini_key_fingerprint(key: str) -> str:
-    """
-    Fingerprint aman untuk debugging.
-    Tidak pernah mencetak API key lengkap ke log.
-    """
+    """Fingerprint aman untuk debugging."""
     if not key:
         return "[EMPTY]"
-
     key = str(key).strip()
-
     if len(key) <= 10:
         return f"{key[:3]}...{key[-2:]}"
-
     return f"{key[:6]}...{key[-4:]}"
 
 # ============================================================
 # MODEL ROTATION
 # ============================================================
-
 MODELS = (
     "gemini-3.5-flash-lite",
     "gemini-3.1-flash-lite",
@@ -162,7 +156,7 @@ MAX_PROCESSED_IDS = 1000
 AUTOMATION_SHARED_SECRET = os.getenv("AUTOMATION_SHARED_SECRET", "")
 
 # ============================================================
-# HELPER AUDIT & SUPABASE PROFILE LOOKUP
+# HELPER AUDIT, PROFILE & UTS SCHEDULE LOOKUP
 # ============================================================
 def save_audit_log(sender_number: str, msg_type: str, user_msg: str, bot_reply: str):
     """Mencatat setiap transaksi obrolan WA Bot ke database Supabase untuk audit internal."""
@@ -197,16 +191,34 @@ def get_student_profile_data(nama_siswa: str) -> dict | None:
         print(f"LOG ERROR Get Student Profile: {e}")
         return None
 
+def get_uts_schedule_context(kelas: str, jenjang: str) -> str:
+    """Mengambil data mentah jadwal UTS dari Supabase dan memformatnya via wa_prompts.py."""
+    if not supabase_client or not kelas:
+        return ""
+    try:
+        tz_wib = pytz.timezone('Asia/Jakarta')
+        today_str = datetime.now(tz_wib).strftime("%Y-%m-%d")
+
+        res = (
+            supabase_client.table("uts_schedules")
+            .select("*")
+            .eq("kelas", str(kelas))
+            .eq("jenjang", str(jenjang).upper())
+            .order("tanggal_ujian", desc=False)
+            .execute()
+        )
+
+        rows = res.data if res and res.data else []
+        return build_uts_schedule_prompt_context(kelas, jenjang, rows, today_str)
+
+    except Exception as e:
+        print(f"LOG ERROR get_uts_schedule_context: {e}")
+        return ""
+
 # ============================================================
 # STREAM & THINKING CONFIGURATION
 # ============================================================
-
 def _stream_config(model_name: str, max_output_tokens: int = 8000) -> types.GenerateContentConfig:
-    """
-    Konfigurasi live untuk meminimalkan time-to-first-token.
-    Gemini 3.x: thinking level high.
-    Gemini Flash-Lite lainnya: thinking dimatikan.
-    """
     if model_name.startswith("gemini-3."):
         return types.GenerateContentConfig(
             system_instruction=SYSTEM_INSTRUCTION,
@@ -225,67 +237,34 @@ def _stream_config(model_name: str, max_output_tokens: int = 8000) -> types.Gene
         ),
     )
 
-
-# ============================================================
-# API KEY HELPER
-# ============================================================
-
 def get_gemini_keys():
     if GEMINI_KEYS:
         return GEMINI_KEYS.copy()
-
     if FALLBACK_GEMINI_KEY:
         return [FALLBACK_GEMINI_KEY]
-
     return []
 
-
-# ============================================================
-# TEXT SANITIZER FOR WHATSAPP (PURGE LATEX & FIX BOLD)
-# ============================================================
-
 def format_text_for_whatsapp(text: str) -> str:
-    """
-    Pembersih otomatis untuk mengubah sisa sintaks LaTeX
-    menjadi karakter Unicode yang rapi di WhatsApp.
-    """
+    """Pembersih otomatis untuk mengubah sisa sintaks LaTeX menjadi Unicode."""
     if not text:
         return text
 
-    # Hapus tanda dolar ($)
     text = text.replace("$", "")
 
-    # Replace perintah LaTeX umum ke Unicode
     latex_replacements = {
-        r"\times": "×",
-        r"\div": "÷",
-        r"\cdot": "·",
-        r"\pm": "±",
-        r"\leq": "≤",
-        r"\le": "≤",
-        r"\geq": "≥",
-        r"\ge": "≥",
-        r"\neq": "≠",
-        r"\approx": "≈",
-        r"\infty": "∞",
-        r"\pi": "π",
-        r"\theta": "θ",
-        r"\alpha": "α",
-        r"\beta": "β",
-        r"\degree": "°",
+        r"\times": "×", r"\div": "÷", r"\cdot": "·", r"\pm": "±",
+        r"\leq": "≤", r"\le": "≤", r"\geq": "≥", r"\ge": "≥",
+        r"\neq": "≠", r"\approx": "≈", r"\infty": "∞", r"\pi": "π",
+        r"\theta": "θ", r"\alpha": "α", r"\beta": "β", r"\degree": "°",
     }
 
     for cmd, unicode_char in latex_replacements.items():
         text = text.replace(cmd, unicode_char)
 
-    # Ubah \sqrt{x} menjadi √(x)
     text = re.sub(r"\\sqrt\{([^}]+)\}", r"√(\1)", text)
     text = re.sub(r"\\sqrt\s*([a-zA-Z0-9]+)", r"√\1", text)
-
-    # Ubah \frac{a}{b} menjadi (a) / (b)
     text = re.sub(r"\\frac\{([^}]+)\}\{([^}]+)\}", r"(\1) / (\2)", text)
 
-    # Ubah simbol caret (^) ke angka pangkat Unicode
     power_map = {
         "^0": "⁰", "^1": "¹", "^2": "²", "^3": "³", "^4": "⁴",
         "^5": "⁵", "^6": "⁶", "^7": "⁷", "^8": "⁸", "^9": "⁹",
@@ -294,9 +273,7 @@ def format_text_for_whatsapp(text: str) -> str:
     for caret, super_char in power_map.items():
         text = text.replace(caret, super_char)
 
-    # Bersihkan sisa backslash (\) kata LaTeX yang tertinggal
     text = re.sub(r"\\([a-zA-Z]+)", r"\1", text)
-
     return text.strip()
 
 # ============================================================
@@ -320,6 +297,7 @@ def generate_ai_response(
     nama_user = ""
     kelas_user = ""
     role_user = "SISWA"
+    metadata_user = {}
 
     if supabase_client:
         try:
@@ -329,8 +307,9 @@ def generate_ai_response(
                 user_data = res.data[0]
                 nama_user = user_data.get("nama", "")
                 role_user = user_data.get("role", "SISWA")
+                metadata_user = user_data.get("metadata") or {}
                 if role_user == "SISWA":
-                    kelas_user = user_data.get("metadata", {}).get("kelas", "")
+                    kelas_user = metadata_user.get("kelas", "")
         except Exception as e:
             print(f"Failed to fetch identity memory: {e}")
 
@@ -352,9 +331,12 @@ def generate_ai_response(
         else: sapaan_waktu = "Malam"
 
         if role_user == "SISWA":
-            jenjang_user = user_data.get("metadata", {}).get("jenjang", "MTS").upper()
+            jenjang_user = metadata_user.get("jenjang", "MTS").upper()
             uts_context = get_uts_schedule_context(kelas_user, jenjang_user)
-            user_context_injection = f"\n\n[SISTEM INTERNAL: Saat ini adalah {sapaan_waktu} hari. Pengguna ini adalah SANTRI bernama {nama_user} dari kelas {kelas_user}. Sapa dia dengan namanya dan puji semangat belajarnya di awal kalimat dengan sapaan {sapaan_waktu} yang ramah!. {uts_context}]"
+            user_context_injection = (
+                f"\n\n[SISTEM INTERNAL: Saat ini adalah {sapaan_waktu} hari. Pengguna ini adalah SANTRI bernama {nama_user} dari kelas {kelas_user} {jenjang_user}. Sapa dia dengan namanya dan puji semangat belajarnya di awal kalimat dengan sapaan {sapaan_waktu} yang ramah!]"
+                f"\n{uts_context}"
+            )
         elif role_user == "GURU":
             user_context_injection = f"\n\n[SISTEM INTERNAL: Saat ini adalah {sapaan_waktu} hari. Pengguna ini adalah GURU/USTADZAH bernama {nama_user}. Sapa beliau dengan hormat (Ustadzah {nama_user}) di awal kalimat dengan sapaan {sapaan_waktu}!]"
 
@@ -435,10 +417,8 @@ def generate_ai_response(
 # WHATSAPP UTILITIES & MESSAGE SENDER
 # ============================================================
 def mark_message_as_read(message_id: str):
-    """Mengubah centang pesan masuk menjadi CENTANG BIRU secara instan."""
     if not WHATSAPP_TOKEN or not PHONE_NUMBER_ID or not message_id:
         return
-
     url = f"https://graph.facebook.com/v18.0/{PHONE_NUMBER_ID}/messages"
     headers = {
         "Authorization": f"Bearer {WHATSAPP_TOKEN}",
@@ -449,20 +429,14 @@ def mark_message_as_read(message_id: str):
         "status": "read",
         "message_id": message_id
     }
-
     try:
         requests.post(url, json=payload, headers=headers, timeout=5)
     except Exception as e:
         print(f"LOG ERROR Mark as Read: {e}")
 
 def download_whatsapp_media(media_id: str) -> tuple[bytes, str]:
-    """
-    Mengunduh file media (gambar / voice note) dari server Meta WhatsApp API berdasarkan media_id.
-    Mengembalikan (binary_bytes, mime_type).
-    """
     if not WHATSAPP_TOKEN or not media_id:
         return None, None
-
     try:
         url = f"https://graph.facebook.com/v18.0/{media_id}"
         headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
@@ -487,30 +461,21 @@ def download_whatsapp_media(media_id: str) -> tuple[bytes, str]:
         print(f"LOG ERROR in download_whatsapp_media: {e}")
         return None, None
         
-def send_whatsapp_message(
-    to_phone: str,
-    message_text: str
-):
+def send_whatsapp_message(to_phone: str, message_text: str):
     if not WHATSAPP_TOKEN:
         print("LOG ERROR: WA_ACCESS_TOKEN belum dikonfigurasi.")
         return
-
     if not PHONE_NUMBER_ID:
         print("LOG ERROR: WA_PHONE_NUMBER_ID belum dikonfigurasi.")
         return
 
-    url = (
-        f"https://graph.facebook.com/v18.0/"
-        f"{PHONE_NUMBER_ID}/messages"
-    )
-
+    url = f"https://graph.facebook.com/v18.0/{PHONE_NUMBER_ID}/messages"
     headers = {
         "Authorization": f"Bearer {WHATSAPP_TOKEN}",
         "Content-Type": "application/json"
     }
 
     message_text = str(message_text).strip()
-
     if not message_text:
         message_text = "Maaf, RoboMANTAP belum dapat menghasilkan jawaban."
 
@@ -540,20 +505,13 @@ def send_whatsapp_message(
         }
 
         try:
-            res = requests.post(
-                url,
-                json=payload,
-                headers=headers,
-                timeout=20
-            )
-
+            res = requests.post(url, json=payload, headers=headers, timeout=20)
             print(f"LOG Send WA -> Status Code: {res.status_code}")
             if res.status_code == 200:
                 try:
                     last_provider_message_id = (res.json().get("messages") or [{}])[0].get("id") or last_provider_message_id
                 except Exception:
                     pass
-
             if res.status_code != 200:
                 print(f"LOG Meta API Error: {res.text}")
 
@@ -561,7 +519,6 @@ def send_whatsapp_message(
             print(f"LOG ERROR Sending WhatsApp Message: {e}")
 
     return last_provider_message_id
-
 
 def resolve_wa_number_for_person(person_id: str):
     if not supabase_client or not person_id:
@@ -707,13 +664,6 @@ async def root():
 # ============================================================
 @app.post("/automation/deliver")
 async def automation_deliver(request: Request):
-    """Authenticated outbound boundary.
-
-    A delivery row must already exist in automation_deliveries with PENDING
-    status. The database transition PENDING -> PROCESSING is the claim gate;
-    only the worker that successfully claims the row may call the provider.
-    This prevents concurrent duplicate WhatsApp sends.
-    """
     if not AUTOMATION_SHARED_SECRET:
         return Response(content='{"status":"disabled"}', media_type="application/json", status_code=503)
     if request.headers.get("X-Automation-Secret", "") != AUTOMATION_SHARED_SECRET:
@@ -895,12 +845,10 @@ async def receive_whatsapp(request: Request, background_tasks: BackgroundTasks):
         print(f"LOG ERROR Processing Webhook: {e}")
         return {"status": "error"}
 
-
 # ============================================================
 # DOCUMENT GENERATOR HELPER (WORD & PDF)
 # ============================================================
 def _add_formatted_runs_word(paragraph, text: str):
-    """Memecah teks *bold* dan _italic_ menjadi runs yang rapi di python-docx."""
     tokens = re.split(r'(\*[^*]+\*|_[^_]+_)', text)
     for token in tokens:
         if not token:
@@ -915,9 +863,7 @@ def _add_formatted_runs_word(paragraph, text: str):
             paragraph.add_run(token)
 
 def create_word_docx(text_content: str) -> bytes:
-    """Mengubah teks jawaban AI menjadi file Word (.docx) dengan layout profesional."""
     doc = Document()
-
     for section in doc.sections:
         section.page_width = Cm(21.0)
         section.page_height = Cm(29.7)
@@ -985,12 +931,7 @@ def create_word_docx(text_content: str) -> bytes:
     doc.save(target_stream)
     return target_stream.getvalue()
 
-
-# ============================================================
-# PDF DOCUMENT GENERATOR (.PDF)
-# ============================================================
 def create_pdf_doc(text_content: str) -> bytes:
-    """Mengubah teks jawaban AI menjadi file PDF rapi dengan tata letak presisi."""
     target_stream = io.BytesIO()
     doc = SimpleDocTemplate(
         target_stream,
@@ -1003,48 +944,26 @@ def create_pdf_doc(text_content: str) -> bytes:
     styles = getSampleStyleSheet()
 
     title_style = ParagraphStyle(
-        'PDFTitle',
-        parent=styles['Heading1'],
-        fontName='Helvetica-Bold',
-        fontSize=14,
-        leading=18,
-        alignment=TA_CENTER,
-        textColor=colors.HexColor('#1A365D'),
-        spaceAfter=12
+        'PDFTitle', parent=styles['Heading1'], fontName='Helvetica-Bold',
+        fontSize=14, leading=18, alignment=TA_CENTER,
+        textColor=colors.HexColor('#1A365D'), spaceAfter=12
     )
 
     heading_style = ParagraphStyle(
-        'PDFHeading',
-        parent=styles['Heading2'],
-        fontName='Helvetica-Bold',
-        fontSize=11,
-        leading=15,
-        alignment=TA_LEFT,
-        textColor=colors.HexColor('#1A365D'),
-        spaceBefore=10,
-        spaceAfter=4
+        'PDFHeading', parent=styles['Heading2'], fontName='Helvetica-Bold',
+        fontSize=11, leading=15, alignment=TA_LEFT,
+        textColor=colors.HexColor('#1A365D'), spaceBefore=10, spaceAfter=4
     )
 
     body_style = ParagraphStyle(
-        'PDFBody',
-        parent=styles['Normal'],
-        fontName='Helvetica',
-        fontSize=10,
-        leading=14,
-        alignment=TA_JUSTIFY,
-        spaceAfter=6,
+        'PDFBody', parent=styles['Normal'], fontName='Helvetica',
+        fontSize=10, leading=14, alignment=TA_JUSTIFY, spaceAfter=6,
         textColor=colors.HexColor('#222222')
     )
 
     bullet_style = ParagraphStyle(
-        'PDFBullet',
-        parent=styles['Normal'],
-        fontName='Helvetica',
-        fontSize=10,
-        leading=14,
-        alignment=TA_JUSTIFY,
-        leftIndent=15,
-        spaceAfter=3,
+        'PDFBullet', parent=styles['Normal'], fontName='Helvetica',
+        fontSize=10, leading=14, alignment=TA_JUSTIFY, leftIndent=15, spaceAfter=3,
         textColor=colors.HexColor('#222222')
     )
 
@@ -1075,61 +994,39 @@ def create_pdf_doc(text_content: str) -> bytes:
         if clean_line.startswith("#") or (clean_line.startswith("*") and clean_line.endswith("*") and len(clean_line) < 80):
             clean_heading = clean_line.strip("#* ").strip()
             story.append(Paragraph(f"<b>{clean_heading}</b>", heading_style))
-        
         elif clean_line.startswith("• ") or clean_line.startswith("- "):
             bullet_text = formatted_text[2:].strip()
             story.append(Paragraph(f"• {bullet_text}", bullet_style))
-            
         else:
             story.append(Paragraph(formatted_text, body_style))
 
     doc.build(story)
     return target_stream.getvalue()
 
-# ============================================================
-# UPLOAD MEDIA & SEND DOCUMENT TO WHATSAPP API
-# ============================================================
 def upload_media_to_whatsapp(file_bytes: bytes, mime_type: str, filename: str) -> str:
-    """Mengunggah file ke Meta WhatsApp Media API untuk mendapatkan media_id."""
     if not WHATSAPP_TOKEN or not PHONE_NUMBER_ID:
         print("LOG ERROR Upload Media: WHATSAPP_TOKEN atau PHONE_NUMBER_ID belum terpasang.")
         return None
 
     url = f"https://graph.facebook.com/v18.0/{PHONE_NUMBER_ID}/media"
     headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
-    
-    data_payload = {
-        "messaging_product": "whatsapp"
-    }
-    
-    files_payload = {
-        "file": (filename, file_bytes, mime_type)
-    }
+    data_payload = {"messaging_product": "whatsapp"}
+    files_payload = {"file": (filename, file_bytes, mime_type)}
 
     try:
-        res = requests.post(
-            url, 
-            headers=headers, 
-            data=data_payload, 
-            files=files_payload, 
-            timeout=30
-        )
+        res = requests.post(url, headers=headers, data=data_payload, files=files_payload, timeout=30)
         print(f"LOG Upload Media Status Code: {res.status_code}")
-        
         if res.status_code == 200:
             media_id = res.json().get("id")
             print(f"LOG Upload Media SUCCESS -> Media ID: {media_id}")
             return media_id
-            
         print(f"LOG ERROR Upload Media Meta Response: {res.text}")
         return None
     except Exception as e:
         print(f"LOG ERROR upload_media_to_whatsapp: {e}")
         return None
 
-
 def send_whatsapp_document(to_phone: str, media_id: str, filename: str, caption: str = ""):
-    """Mengirimkan file dokumen (Word/PDF) ke pengguna WhatsApp."""
     if not WHATSAPP_TOKEN or not PHONE_NUMBER_ID or not media_id:
         return
 
@@ -1156,30 +1053,3 @@ def send_whatsapp_document(to_phone: str, media_id: str, filename: str, caption:
             print(f"LOG Meta API Error Document: {res.text}")
     except Exception as e:
         print(f"LOG ERROR send_whatsapp_document: {e}")
-
-# =================================================================================
-# PEMANGGILAN DATA UTS
-# =================================================================================
-def get_uts_schedule_context(kelas: str, jenjang: str) -> str:
-    """Mengambil data mentah jadwal UTS dari Supabase dan memformatnya via wa_prompts.py."""
-    if not supabase_client or not kelas:
-        return ""
-    try:
-        tz_wib = pytz.timezone('Asia/Jakarta')
-        today_str = datetime.now(tz_wib).strftime("%Y-%m-%d")
-
-        res = (
-            supabase_client.table("uts_schedules")
-            .select("*")
-            .eq("kelas", str(kelas))
-            .eq("jenjang", str(jenjang).upper())
-            .order("tanggal_ujian", desc=False)
-            .execute()
-        )
-
-        rows = res.data if res and res.data else []
-        return build_uts_schedule_prompt_context(kelas, jenjang, rows, today_str)
-
-    except Exception as e:
-        print(f"LOG ERROR get_uts_schedule_context: {e}")
-        return ""
