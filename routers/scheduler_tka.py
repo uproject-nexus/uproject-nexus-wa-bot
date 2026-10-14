@@ -26,7 +26,7 @@ SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # Konfigurasi WA Bot Endpoint
-WA_BOT_URL = os.getenv("WA_BOT_URL", "https://URL-WA-BOT-ANDA.render.com")
+WA_BOT_URL = os.getenv("WA_BOT_URL", "https://uproject-nexus-wa-bot.onrender.com")
 AUTOMATION_SHARED_SECRET = os.getenv("AUTOMATION_SHARED_SECRET", "")
 
 def get_expiring_tkas():
