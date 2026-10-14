@@ -262,3 +262,41 @@ def get_tka_reminder_msg(nama: str, mapel: str, waktu_habis: str) -> str:
         f"⏰ *Catatan:* Akses TKA ini akan ditutup pukul *{waktu_habis}*.\n\n"
         f"Yuk segera selesaikan sebelum batas waktunya habis yaa. Semangat! 💪✨"
     )
+
+# ============================================================
+# 6. DYNAMIC UTS SCHEDULE PROMPT CONTEXT TEMPLATE
+# ============================================================
+
+def build_uts_schedule_prompt_context(kelas: str, jenjang: str, rows: list, today_str: str) -> str:
+    """Format data jadwal UTS dari database menjadi teks konteks prompt untuk AI Gemini."""
+    if not rows:
+        return f"\n[INFO JADWAL UTS: Belum ada jadwal UTS terdaftar di database untuk Kelas {kelas} {jenjang.upper()}]."
+
+    lines = [f"\n[DATA RESMI JADWAL UTS KELAS {kelas} {jenjang.upper()} (SINKRONISASI SUPABASE):]"]
+    today_found = False
+
+    for row in rows:
+        tgl = row.get("tanggal_ujian")
+        mapel = row.get("mapel", "-")
+        soal_list = row.get("soal_pemanasan", [])
+
+        if tgl == today_str:
+            today_found = True
+            lines.append(f"★ HARI INI ({tgl}): UJIAN {mapel}")
+            if soal_list:
+                soal_fmt = "; ".join([
+                    f"Pertanyaan: {s.get('pertanyaan')} (Kunci: {s.get('kunci')})"
+                    for s in soal_list if isinstance(s, dict)
+                ])
+                lines.append(f"   - Soal Pemanasan/Kisi-kisi Hari Ini: {soal_fmt}")
+        else:
+            lines.append(f"• Tanggal {tgl}: {mapel}")
+
+    if not today_found:
+        lines.append(f"• Catatan: Untuk hari ini ({today_str}) tidak ada jadwal ujian UTS.")
+
+    lines.append(
+        "Instruksi AI: Gunakan data jadwal resmi di atas untuk menjawab pertanyaan santri mengenai jadwal UTS, "
+        "mata pelajaran hari ini/besok, serta bahan rangkuman kuis/kisi-kisi!"
+    )
+    return "\n".join(lines)
