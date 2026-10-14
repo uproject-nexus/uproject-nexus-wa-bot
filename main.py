@@ -352,7 +352,9 @@ def generate_ai_response(
         else: sapaan_waktu = "Malam"
 
         if role_user == "SISWA":
-            user_context_injection = f"\n\n[SISTEM INTERNAL: Saat ini adalah {sapaan_waktu} hari. Pengguna ini adalah SANTRI bernama {nama_user} dari kelas {kelas_user}. Sapa dia dengan namanya dan puji semangat belajarnya di awal kalimat dengan sapaan {sapaan_waktu} yang ramah!]"
+            jenjang_user = user_data.get("metadata", {}).get("jenjang", "MTS").upper()
+            uts_context = get_uts_schedule_context(kelas_user, jenjang_user)
+            user_context_injection = f"\n\n[SISTEM INTERNAL: Saat ini adalah {sapaan_waktu} hari. Pengguna ini adalah SANTRI bernama {nama_user} dari kelas {kelas_user}. Sapa dia dengan namanya dan puji semangat belajarnya di awal kalimat dengan sapaan {sapaan_waktu} yang ramah!. {uts_context}]"
         elif role_user == "GURU":
             user_context_injection = f"\n\n[SISTEM INTERNAL: Saat ini adalah {sapaan_waktu} hari. Pengguna ini adalah GURU/USTADZAH bernama {nama_user}. Sapa beliau dengan hormat (Ustadzah {nama_user}) di awal kalimat dengan sapaan {sapaan_waktu}!]"
 
