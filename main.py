@@ -612,19 +612,59 @@ def process_message_background(
                     )
                 else:
                     row = challenge.data[0]
-                    if not row.get("verified_at"):
-                        (
+                    verified = bool(row.get("verified_at"))
+                    if not verified:
+                        # Jangan mengirim pesan sukses hanya karena request UPDATE tidak melempar error.
+                        # PostgREST dapat mengembalikan 0 baris jika filter tidak cocok atau izin menolak.
+                        update_result = (
                             supabase_client.table("student_portal_login_challenges")
                             .update({"verified_at": now_utc})
                             .eq("token_hash", token_hash)
                             .eq("wa_number", str(from_number))
+                            .is_("consumed_at", "null")
+                            .gt("expires_at", now_utc)
+                            .select("token_hash,verified_at")
                             .execute()
                         )
-                    reply = (
-                        f"Konfirmasi login Portal SantriMANTAP untuk username *{row.get('username', 'santri')}* "
-                        "berhasil. Kembali ke portal dan tekan tombol *Saya sudah mengirim konfirmasi*. "
-                        "Jika tautan telah kedaluwarsa, mulai login kembali."
-                    )
+                        verified = bool(
+                            update_result.data
+                            and update_result.data[0].get("verified_at")
+                        )
+                        # Read-after-write: pastikan status yang dibaca portal benar-benar tersimpan.
+                        if not verified:
+                            verify_result = (
+                                supabase_client.table("student_portal_login_challenges")
+                                .select("verified_at,expires_at,consumed_at")
+                                .eq("token_hash", token_hash)
+                                .eq("wa_number", str(from_number))
+                                .gt("expires_at", now_utc)
+                                .is_("consumed_at", "null")
+                                .limit(1)
+                                .execute()
+                            )
+                            verified = bool(
+                                verify_result.data
+                                and verify_result.data[0].get("verified_at")
+                            )
+                    if verified:
+                        reply = (
+                            f"Konfirmasi login Portal SantriMANTAP untuk username *{row.get('username', 'santri')}* "
+                            "berhasil dan statusnya sudah tersimpan. Kembali ke portal lalu tekan tombol "
+                            "*Saya sudah mengirim konfirmasi*. Jika portal masih belum menerima status, "
+                            "muat ulang halaman portal dan coba sekali lagi sebelum tautan kedaluwarsa."
+                        )
+                    else:
+                        print(
+                            "LOG ERROR Portal Login Verification: challenge ditemukan, "
+                            "tetapi verified_at tidak berhasil dibaca setelah update. "
+                            f"token_hash={token_hash[:10]}..."
+                        )
+                        reply = (
+                            "Token konfirmasi ditemukan, tetapi statusnya belum berhasil tersimpan. "
+                            "Jangan tekan konfirmasi berulang kali. Kembali ke portal, mulai login baru, "
+                            "dan jika terulang hubungi admin untuk memeriksa izin tabel "
+                            "student_portal_login_challenges di Supabase."
+                        )
                 send_whatsapp_message(from_number, reply)
                 save_audit_log(from_number, "text", user_text, reply)
             except Exception as verification_error:
