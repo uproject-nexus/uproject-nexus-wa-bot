@@ -1,6 +1,7 @@
 import os
 import re
 import io
+import hashlib
 import random
 import requests
 import html
@@ -17,7 +18,7 @@ from docx.oxml.ns import nsdecls
 from reportlab.lib import colors
 from reportlab.lib.units import cm
 from reportlab.lib.pagesizes import A4
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from docx.shared import Pt, RGBColor, Inches, Cm
 from docx.enum.table import WD_ALIGN_VERTICAL
 from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -191,29 +192,65 @@ def get_student_profile_data(nama_siswa: str) -> dict | None:
         print(f"LOG ERROR Get Student Profile: {e}")
         return None
 
+def fetch_uts_schedule_rows(kelas: str, jenjang: str, tanggal_ujian: str | None = None) -> list[dict]:
+    """Read official UTS rows from the current canonical table, with legacy-name fallback."""
+    if not supabase_client or not str(kelas or "").strip():
+        return []
+    last_error = None
+    for table_name in ("uts_schedules", "uts_schedule"):
+        try:
+            query = (
+                supabase_client.table(table_name)
+                .select("*")
+                .eq("kelas", str(kelas).strip())
+                .ilike("jenjang", str(jenjang or "").strip())
+            )
+            if tanggal_ujian:
+                query = query.eq("tanggal_ujian", str(tanggal_ujian))
+            query = query.order("tanggal_ujian", desc=False)
+            result = query.execute()
+            return result.data or []
+        except Exception as exc:
+            last_error = exc
+            continue
+    if last_error:
+        print(f"LOG ERROR fetch_uts_schedule_rows: {last_error}")
+    return []
+
+
+def is_notification_enabled(wa_number: str, setting: str) -> bool:
+    """Read per-student alert preference; default to enabled for legacy users."""
+    allowed = {"morning_alert_enabled", "night_alert_enabled"}
+    if setting not in allowed or not supabase_client or not wa_number:
+        return True
+    try:
+        result = (
+            supabase_client.table("student_portal_preferences")
+            .select(setting)
+            .eq("wa_number", str(wa_number).strip())
+            .limit(1)
+            .execute()
+        )
+        if result.data:
+            return bool(result.data[0].get(setting, True))
+    except Exception as exc:
+        print(f"LOG WARNING Notification preference read failed: {exc}")
+    return True
+
+
 def get_uts_schedule_context(kelas: str, jenjang: str) -> str:
-    """Mengambil data mentah jadwal UTS dari Supabase dan memformatnya via wa_prompts.py."""
+    """Ambil jadwal UTS resmi dari Supabase dan format sebagai konteks AI."""
     if not supabase_client or not kelas:
         return ""
     try:
-        tz_wib = pytz.timezone('Asia/Jakarta')
+        tz_wib = pytz.timezone("Asia/Jakarta")
         today_str = datetime.now(tz_wib).strftime("%Y-%m-%d")
-
-        res = (
-            supabase_client.table("uts_schedules")
-            .select("*")
-            .eq("kelas", str(kelas))
-            .eq("jenjang", str(jenjang).upper())
-            .order("tanggal_ujian", desc=False)
-            .execute()
-        )
-
-        rows = res.data if res and res.data else []
+        rows = fetch_uts_schedule_rows(kelas, jenjang)
         return build_uts_schedule_prompt_context(kelas, jenjang, rows, today_str)
-
-    except Exception as e:
-        print(f"LOG ERROR get_uts_schedule_context: {e}")
+    except Exception as exc:
+        print(f"LOG ERROR get_uts_schedule_context: {exc}")
         return ""
+
 
 # ============================================================
 # STREAM & THINKING CONFIGURATION
@@ -549,6 +586,56 @@ def process_message_background(
         mark_message_as_read(message_id)
         
         # ---------------------------------------------------------
+        # KONFIRMASI LOGIN PORTAL SANTRI MELALUI WHATSAPP
+        # ---------------------------------------------------------
+        if user_text and user_text.strip().upper().startswith("VERIFIKASI PORTAL "):
+            token = user_text.strip().split(None, 2)[-1].strip()
+            token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+            now_utc = datetime.now(timezone.utc).isoformat()
+            try:
+                if not supabase_client:
+                    raise RuntimeError("Supabase belum terhubung")
+                challenge = (
+                    supabase_client.table("student_portal_login_challenges")
+                    .select("token_hash,username,wa_number,verified_at,expires_at,consumed_at")
+                    .eq("token_hash", token_hash)
+                    .eq("wa_number", str(from_number))
+                    .gt("expires_at", now_utc)
+                    .is_("consumed_at", "null")
+                    .limit(1)
+                    .execute()
+                )
+                if not challenge.data:
+                    reply = (
+                        "Konfirmasi login tidak ditemukan atau sudah kedaluwarsa. "
+                        "Silakan kembali ke Portal SantriMANTAP dan mulai login lagi."
+                    )
+                else:
+                    row = challenge.data[0]
+                    if not row.get("verified_at"):
+                        (
+                            supabase_client.table("student_portal_login_challenges")
+                            .update({"verified_at": now_utc})
+                            .eq("token_hash", token_hash)
+                            .eq("wa_number", str(from_number))
+                            .execute()
+                        )
+                    reply = (
+                        f"Konfirmasi login Portal SantriMANTAP untuk username *{row.get('username', 'santri')}* "
+                        "berhasil. Kembali ke portal dan tekan tombol *Saya sudah mengirim konfirmasi*. "
+                        "Jika tautan telah kedaluwarsa, mulai login kembali."
+                    )
+                send_whatsapp_message(from_number, reply)
+                save_audit_log(from_number, "text", user_text, reply)
+            except Exception as verification_error:
+                print(f"LOG ERROR Portal Login Verification: {verification_error}")
+                send_whatsapp_message(
+                    from_number,
+                    "Maaf, konfirmasi login belum dapat diproses. Pastikan database sudah diperbarui, lalu coba lagi."
+                )
+            return
+
+        # ---------------------------------------------------------
         # DETEKSI REGISTRASI IDENTITAS (HANDSHAKE)
         # ---------------------------------------------------------
         if user_text and "halo robomantap! saya" in user_text.lower():
@@ -556,37 +643,66 @@ def process_message_background(
                 # 1. Mode Siswa
                 if "[siswa]" in user_text.lower():
                     try:
-                        data_mentah = user_text.split(":")[-1]
-                        parts = data_mentah.split("-")
-                        if len(parts) < 4:
-                            raise ValueError("Format rusak")
-                            
-                        nama = parts[0].strip()
-                        jenjang = parts[1].strip()
-                        kelas = parts[2].strip()
-                        absen = parts[3].strip()
-                            
+                        data_mentah = user_text.split(":", 1)[-1]
+                        parts = [part.strip() for part in data_mentah.split(" - ")]
+                        if len(parts) < 5:
+                            raise ValueError("Format pendaftaran belum menyertakan username")
+
+                        nama, jenjang, kelas, absen, username = parts[:5]
+                        username = str(username or "").strip().casefold()
+                        if not re.fullmatch(r"[a-z0-9][a-z0-9._]{2,23}", username):
+                            raise ValueError("Format username tidak valid")
+
                         student_key = f"{nama.casefold().replace(' ', '')}|{jenjang.casefold().replace(' ', '')}"
-                        
-                        if supabase_client:
-                            supabase_client.table("wa_identities").upsert({
-                                "wa_number": from_number,
-                                "person_id": student_key,
-                                "status": "ACTIVE",
-                                "role": "SISWA",
-                                "nama": nama,
-                                "metadata": {"jenjang": jenjang, "kelas": kelas, "absen": absen}
-                            }).execute()
-    
+                        if not supabase_client:
+                            raise RuntimeError("Supabase belum terhubung")
+
+                        existing = (
+                            supabase_client.table("wa_identities")
+                            .select("wa_number")
+                            .ilike("username", username)
+                            .limit(1)
+                            .execute()
+                        )
+                        if existing.data and str(existing.data[0].get("wa_number") or "") != str(from_number):
+                            reply = (
+                                "Username tersebut sudah digunakan. Silakan kembali ke halaman utama "
+                                "RoboMANTAP dan pilih username unik lainnya, lalu kirim ulang verifikasi."
+                            )
+                            send_whatsapp_message(from_number, reply)
+                            save_audit_log(from_number, "text", user_text, reply)
+                            return
+
+                        supabase_client.table("wa_identities").upsert({
+                            "wa_number": from_number,
+                            "person_id": student_key,
+                            "status": "ACTIVE",
+                            "role": "SISWA",
+                            "nama": nama,
+                            "username": username,
+                            "metadata": {"jenjang": jenjang, "kelas": kelas, "absen": absen}
+                        }, on_conflict="wa_number").execute()
+
                         reply = get_student_handshake_success_msg(nama, kelas)
+                        reply += f"\\n\\nUsername Portal SantriMANTAP kamu: *{username}*. Jaga kerahasiaannya dan jangan dibagikan."
                         send_whatsapp_message(from_number, reply)
                         save_audit_log(from_number, "text", user_text, reply)
                         return
-                        
-                    except Exception:
-                        reply = HANDSHAKE_FORMAT_ERROR_MSG
+
+                    except Exception as registration_error:
+                        print(f"LOG ERROR Student Registration: {registration_error}")
+                        if "username" in str(registration_error).lower() and (
+                            "duplicate" in str(registration_error).lower()
+                            or "unique" in str(registration_error).lower()
+                            or "already" in str(registration_error).lower()
+                        ):
+                            reply = "Username sudah digunakan. Silakan pilih username lain melalui halaman utama RoboMANTAP."
+                        elif "column" in str(registration_error).lower() and "username" in str(registration_error).lower():
+                            reply = "Pendaftaran belum dapat diselesaikan karena database belum diperbarui. Silakan hubungi admin RoboMANTAP."
+                        else:
+                            reply = HANDSHAKE_FORMAT_ERROR_MSG
                         send_whatsapp_message(from_number, reply)
-                        return                      
+                        return
 
                 # 2. Mode Guru
                 elif "[guru]" in user_text.lower() and "validated" in user_text.lower():
