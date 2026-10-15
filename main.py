@@ -685,13 +685,16 @@ def process_message_background(
                     try:
                         data_mentah = user_text.split(":", 1)[-1]
                         parts = [part.strip() for part in data_mentah.split(" - ")]
-                        if len(parts) < 5:
-                            raise ValueError("Format pendaftaran belum menyertakan username")
+                        if len(parts) < 6:
+                            raise ValueError("Format pendaftaran belum menyertakan username dan PIN")
 
-                        nama, jenjang, kelas, absen, username = parts[:5]
+                        nama, jenjang, kelas, absen, username, pin_hash = parts[:6]
                         username = str(username or "").strip().casefold()
+                        pin_hash = str(pin_hash or "").strip()
                         if not re.fullmatch(r"[a-z0-9][a-z0-9._]{2,23}", username):
                             raise ValueError("Format username tidak valid")
+                        if not re.fullmatch(r"pbkdf2_sha256\$310000\$[a-f0-9]{32}\$[a-f0-9]{64}", pin_hash):
+                            raise ValueError("Hash PIN tidak valid; buat ulang PIN dari halaman utama")
 
                         student_key = f"{nama.casefold().replace(' ', '')}|{jenjang.casefold().replace(' ', '')}"
                         if not supabase_client:
@@ -720,6 +723,7 @@ def process_message_background(
                             "role": "SISWA",
                             "nama": nama,
                             "username": username,
+                            "pin_hash": pin_hash,
                             "metadata": {"jenjang": jenjang, "kelas": kelas, "absen": absen}
                         }, on_conflict="wa_number").execute()
 
