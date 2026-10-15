@@ -19,7 +19,7 @@ HARI_INDONESIA = {
 @router.get("/night-alert")
 async def trigger_night_alert(request: Request):
     global last_night_alert_date
-    from main import send_whatsapp_message, supabase_client
+    from main import send_whatsapp_message, supabase_client, fetch_uts_schedule_rows, is_notification_enabled
 
     wib = pytz.timezone("Asia/Jakarta")
     now_wib = datetime.now(wib)
@@ -35,7 +35,7 @@ async def trigger_night_alert(request: Request):
     try:
         res = (
             supabase_client.table("wa_identities")
-            .select("wa_number, nama, role, person_id, kelas, jenjang")
+            .select("wa_number, nama, role, person_id, metadata")
             .eq("status", "ACTIVE")
             .execute()
         )
@@ -48,20 +48,18 @@ async def trigger_night_alert(request: Request):
             to_phone = user.get("wa_number")
             nama = user.get("nama", "Sobat")
             role = user.get("role", "SISWA")
-            user_kelas = user.get("kelas", "7")
-            user_jenjang = user.get("jenjang", "MTS")
+            metadata = user.get("metadata") or {}
+            user_kelas = str(metadata.get("kelas") or user.get("kelas") or "7")
+            user_jenjang = str(metadata.get("jenjang") or user.get("jenjang") or "MTS").upper()
+
+            if role == "SISWA" and not is_notification_enabled(to_phone, "night_alert_enabled"):
+                continue
 
             if role == "SISWA":
-                drill_res = (
-                    supabase_client.table("uts_schedules")
-                    .select("*")
-                    .eq("tanggal_ujian", tomorrow_date_str)
-                    .eq("kelas", str(user_kelas))
-                    .eq("jenjang", str(user_jenjang).upper())
-                    .execute()
+                schedule_rows = fetch_uts_schedule_rows(
+                    user_kelas, user_jenjang, tanggal_ujian=tomorrow_date_str
                 )
-                
-                uts_info = drill_res.data[0] if drill_res and drill_res.data else None
+                uts_info = schedule_rows[0] if schedule_rows else None
 
                 if uts_info:
                     mapel_besok = uts_info.get("mapel", "Mata Pelajaran UTS")
